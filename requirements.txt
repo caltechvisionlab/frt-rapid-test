@@ -1,0 +1,17 @@
+pytest
+sphinx
+pandas
+feedparser
+newspaper3k
+azure-cognitiveservices-vision-face
+boto3
+numpy
+matplotlib
+seaborn
+Pillow
+Werkzeug<2.1
+Flask<2.1
+pyngrok
+scikit-learn
+difPy>=2.4.1
+networkx
