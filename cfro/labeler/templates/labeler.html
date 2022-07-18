@@ -1,0 +1,115 @@
+<html>
+<title>CS81 Labeling Tool</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://www.w3schools.com/w3css/4/w3.css">
+<link rel='stylesheet' href='https://fonts.googleapis.com/css?family=Roboto'>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+<style>
+html,body,h1,h2,h3,h4,h5,h6 {font-family: "Roboto", sans-serif}
+</style>
+<body>
+    <h2>Click on all faces for {{name}}</h2>
+    <h3>Each face you select as a positive match will be grayed out. Click again to unselect.</h3>
+    <h3><a href="/">Click here</a> to go back to the homepage.</h3>
+    <h3><a href="/crop/{{name}}">Click here</a> to switch to a cropped view of the faces.</h3>
+    <h3><a href="/exit">Click here</a> to exit the tool.</h3>
+
+    <form name="Annotation Form" method="Post">
+
+    <input hidden id="num_faces" value={{num_faces}}></input>
+
+    {% for (annotation_id, (face_id, image_url, bbox)) in id_url_bbox %}
+        <input hidden id="index{{annotation_id}}" value={{face_id}}></input>
+        <input hidden id="url{{annotation_id}}" value={{image_url}}></input>
+        <input hidden id="bbox_l{{annotation_id}}" value="{{bbox[0]}}"></input>
+        <input hidden id="bbox_t{{annotation_id}}" value="{{bbox[1]}}"></input>
+        <input hidden id="bbox_w{{annotation_id}}" value="{{bbox[2]}}"></input>
+        <input hidden id="bbox_h{{annotation_id}}" value="{{bbox[3]}}"></input>
+        <canvas id="canvas{{face_id}}" onclick="toggle_annotation({{face_id}})"></canvas>
+        <input hidden id="hidden{{face_id}}" name="annotation_face_{{face_id}}" value=0></input>
+    {% endfor %}
+    <br>
+    <br>
+    <input type="submit" name="Submit" value="Submit" style="width: 300px; height: 100px">
+</form>
+
+</body>
+
+<script>
+    num_faces = document.getElementById('num_faces').value;
+    for (i = 0; i < num_faces; i++) {
+        face_id = document.getElementById('index' + i).value;
+        bbox_l = document.getElementById('bbox_l' + i).value;
+        bbox_t = document.getElementById('bbox_t' + i).value;
+        bbox_w = document.getElementById('bbox_w' + i).value;
+        bbox_h = document.getElementById('bbox_h' + i).value;
+        bbox = [bbox_l, bbox_t, bbox_w, bbox_h]
+        url = document.getElementById('url' + i).value;
+        load_canvas(face_id, bbox, url);
+    }
+
+    function load_canvas(i, bbox, url) {
+
+        // https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/drawImage
+        const canvas = document.getElementById('canvas' + i);
+        const ctx = canvas.getContext('2d');
+
+        const image = new Image(500, 350); // Using optional size for image
+        image.onload = drawImageActualSize; // Draw when image has loaded
+
+        // Load an image of intrinsic size 1087x782 in CSS pixels
+        image.src = url;
+
+        function drawImageActualSize() {
+            canvas.width = this.width;
+            canvas.height = this.height;
+
+            ctx.drawImage(this, 0, 0, this.width, this.height)
+
+            bbox_left = bbox[0];
+            bbox_top = bbox[1];
+            bbox_width = bbox[2];
+            bbox_height = bbox[3];
+
+            bbox_left /= this.naturalWidth;
+            bbox_top /= this.naturalHeight;
+            bbox_width /= this.naturalWidth;
+            bbox_height /= this.naturalHeight;
+
+            bbox_left *= canvas.width;
+            bbox_top *= canvas.height;
+            bbox_width *= canvas.width;
+            bbox_height *= canvas.height;
+
+            // https://www.w3schools.com/tags/canvas_rect.asp
+            // context.rect(x,y,width,height);
+            // x,y are for upper left corner
+            ctx.beginPath();
+            ctx.lineWidth = "6";
+            ctx.strokeStyle = "red";
+            ctx.rect(bbox_left, bbox_top, bbox_width, bbox_height);
+            ctx.stroke();
+        }
+    }
+
+    function toggle_annotation(img_id) {
+        // Set a hidden field with the annotation value.
+        hidden_input = document.getElementById("hidden" + img_id)
+        hidden_input.value = 1 - hidden_input.value
+
+        // Render the image as slightly transparent if the new value
+        element_name = "canvas" + img_id
+        curr_canvas = document.getElementById("canvas" + img_id)
+        if (hidden_input.value == 1) {
+            curr_canvas.style.opacity = 0.3;
+        }
+        else {
+            // If we restore it to 1, there is a glitch, so we pick
+            // a value arbitrarily close to 1.
+            curr_canvas.style.opacity = 0.9999999;
+        }
+    }
+</script>
+
+</html>

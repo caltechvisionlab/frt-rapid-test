@@ -1,0 +1,74 @@
+<html>
+<title>CS81 Results Tool</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://www.w3schools.com/w3css/4/w3.css">
+<link rel='stylesheet' href='https://fonts.googleapis.com/css?family=Roboto'>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+<style>
+html,body,h1,h2,h2,h4,h5,h6 {font-family: "Roboto", sans-serif}
+
+/* https://www.w3schools.com/howto/howto_css_two_columns.asp */
+/* https://wpsites.net/free-tutorials/uneven-columns-using-html-css/ */
+.first_col {
+    width: 40%;
+    padding: 0 10px 0 0;
+    float: left;
+}
+
+.second_col {
+    width: 40%;
+    padding: 0 10px 0 0;
+    float: left;
+}
+
+li {
+	font-size: 20px;
+}
+</style>
+<body>
+
+	<div class="first_col">
+
+		<h1><u>Same-ID Comparisons</u></h1>    
+	
+		<h2 style="color:darkgreen;">Aggregate</h2>
+		<ul>
+			<li>Most representative faces (<a href="representative_avg_same_id_{{provider_id}}.html">Average</a> or <a href="representative_median_same_id_{{provider_id}}.html">Median</a>)</li>
+			<li><a href="representative_pairs_same_id_{{provider_id}}.html">Most confident matches</a></li>
+			<li>Least representative faces (<a href="confusing_avg_same_id_{{provider_id}}.html">Average</a> or <a href="confusing_median_same_id_{{provider_id}}.html">Median</a>)</li>
+			<li><a href="confusing_pairs_same_id_{{provider_id}}.html">Least confident matches</a></li>
+		</ul>
+		{% for name, person_id in names_ids %}
+		<h2 style="color:darkblue;">{{person_id+1}}. {{name}}</h2>
+		<ul>
+			<li>Most representative faces (<a href="representative_avg_same_id_{{person_id}}_{{provider_id}}.html">Average</a> or <a href="representative_median_same_id_{{person_id}}_{{provider_id}}.html">Median</a>)</li>
+			<li><a href="representative_pairs_same_id_{{person_id}}_{{provider_id}}.html">Most confident matches</a></li>
+			<li>Least representative faces (<a href="confusing_avg_same_id_{{person_id}}_{{provider_id}}.html">Average</a> or <a href="confusing_median_same_id_{{person_id}}_{{provider_id}}.html">Median</a>)</li>
+			<li><a href="confusing_pairs_same_id_{{person_id}}_{{provider_id}}.html">Least confident matches</a></li>
+		</ul>
+		{% endfor %}
+
+	</div>
+	<div class="second_col">
+		<h1><u>Different-ID Comparisons</u></h1>   
+		
+		<h2 style="color:darkgreen;">Aggregate</h2>
+		<ul>
+			<li>Most distinguishable faces (<a href="distinguishable_avg_diff_id_{{provider_id}}.html">Average</a> or <a href="distinguishable_median_diff_id_{{provider_id}}.html">Median</a>)</li>
+			<li><a href="distinguishable_pairs_diff_id_{{provider_id}}.html">Most confident non-matches</a></li>
+			<li>Least distinguishable faces (<a href="confusing_avg_diff_id_{{provider_id}}.html">Average</a> or <a href="confusing_median_diff_id_{{provider_id}}.html">Median</a>)</li>
+			<li><a href="confusing_pairs_diff_id_{{provider_id}}.html">Least confident non-matches</a></li>
+		</ul>
+		{% for name, person_id in names_ids %}
+		<h2 style="color:darkblue;">{{person_id+1}}. {{name}}</h2>
+		<ul>
+			<li>Most distinguishable faces (<a href="representative_avg_diff_id_{{person_id}}_{{provider_id}}.html">Average</a> or <a href="representative_median_diff_id_{{person_id}}_{{provider_id}}.html">Median</a>)</li>
+			<li><a href="representative_pairs_diff_id_{{person_id}}_{{provider_id}}.html">Most confident non-matches</a></li>
+			<li>Least distinguishable faces (<a href="confusing_avg_diff_id_{{person_id}}_{{provider_id}}.html">Average</a> or <a href="confusing_median_diff_id_{{person_id}}_{{provider_id}}.html">Median</a>)</li>
+			<li><a href="confusing_pairs_diff_id_{{person_id}}_{{provider_id}}.html">Least confident non-matches</a></li>
+		</ul>
+		{% endfor %}
+	</div>
+
+</body>
