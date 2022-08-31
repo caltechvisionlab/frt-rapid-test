@@ -1,3 +1,7 @@
+import sys
+from io import StringIO
+import contextlib
+
 # This library is used to parse the Google News API RSS output.
 # https://pypi.org/project/feedparser/
 # https://pythonhosted.org/feedparser/introduction.html
@@ -20,20 +24,25 @@ import socket
 
 # These libraries are used to download images and save to OS.
 import urllib.request
+import requests
 import os
 
 # This is used to detect and remove duplicate images.
+from keras.applications.mobilenet import MobileNet
+import tensorflow as tf
+from sklearn.metrics.pairwise import cosine_similarity
+from .data_generator import DataGenerator
 from difPy import dif
 import networkx as nx
+import numpy as np
 import shutil
+from PIL import Image, ImageChops, ExifTags
+import io
 
 from .dataset import Photo
 
-from enum import Enum
 
-
-class ImageSource(Enum):
-    GOOGLE_NEWS = 1
+tf.get_logger().setLevel('ERROR')
 
 
 class ImageScraper:
@@ -58,6 +67,7 @@ class ImageScraper:
 
     NUM_WORKERS = 5
 
+    @staticmethod
     def _passes_pub_date_filter(rss_entry, max_days_old):
         cutoff = datetime.now() - timedelta(days=max_days_old)
         pub_date = datetime.fromtimestamp(time.mktime(rss_entry["published_parsed"]))
@@ -65,6 +75,7 @@ class ImageScraper:
         #     print(f"Article {rss_entry['link']} fails the {max_days_old} day cutoff ({pub_date} <= {cutoff})")
         return pub_date > cutoff
 
+    @staticmethod
     def _gen_google_news_article_urls(query, max_days_old=None):
         """
         Returns a list of urls, search results of `query` on Google News.
@@ -94,6 +105,7 @@ class ImageScraper:
 
         return [entry["link"] for entry in entries]
 
+    @staticmethod
     def _gen_image_urls_from_article(article_url):
         """
         Returns a list of image urls found on `article_url`.
@@ -107,16 +119,21 @@ class ImageScraper:
             # Python 3.9 instead of Python 3.10). It goes away when `article.parse()`
             # is commented out and [] is returned and only affects < 10 articles per person. Example:
             # "encoding error : input conversion failed due to input error, bytes 0x21 0x00 0x00 0x00"
+
+            # supress error output for this line:
+
             article.parse()
             # To obtain more images, use `return article.images` here (probably not needed).
             top_image = article.top_image
             # Ensure the image exists and is not a gif
             valid_image = len(top_image) > 0 and ".gif" not in top_image
-            print(".", end="", flush=True)
+            print("✓", end="", flush=True)
             return [top_image] if valid_image else []
         except:
+            print(".", end="", flush=True)
             return []
 
+    @staticmethod
     def _gen_image_urls_from_articles(article_urls):
         """
         Returns image urls collected from articles in `article_urls`
@@ -124,7 +141,7 @@ class ImageScraper:
         image_urls = []
         # We can use a with statement to ensure threads are cleaned up promptly
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=ImageScraper.NUM_WORKERS
+                max_workers=ImageScraper.NUM_WORKERS
         ) as executor:
             # Start the parsing operations and mark each future with its URL
             futures = [
@@ -136,20 +153,46 @@ class ImageScraper:
                 image_urls.extend(curr_image_urls)
         return list(set(image_urls))
 
-    def _gen_image_urls_for_person(person_name, download_source, max_days_old=None):
+    @staticmethod
+    def _gen_image_urls_for_person(person_name, download_source="google_images",
+                                   max_days_old=None, scraper_credentials=None):
         """
         Returns a list of image urls based on a query of
         param `download_source` to find images of `person_name`
         """
-        if download_source != ImageSource.GOOGLE_NEWS:
-            raise NotImplementedError("Only Google News is supported.")
+        if download_source == "google_images":
+            query = person_name
+            cx = scraper_credentials['GoogleImages']['cx']
+            PRIVATE_KEY = scraper_credentials['GoogleImages']['PRIVATE_KEY']
+            image_urls = []
+            # Request the maximum of 10 urls at a time
+            for start in range(1, 100, 10):
+                request_query = f"https://customsearch.googleapis.com/customsearch/v1?q={query}&cx={cx}&dateRestrict=y1&searchType=image&start={start}&key={PRIVATE_KEY}"
+                r = requests.get(request_query)
+                # Get the url links and remove the x-raw-image ones (from pdfs) 
+                try:
+                    links = [item["link"] for item in r.json()["items"] if item["link"].split(':')[0] != 'x-raw-image']
+                except KeyError as e:
+                    try:
+                        if 429 == r.json()["error"]["code"]:
+                            print("Quota exceeded for 'Queries per day' limit")
+                    except KeyError as er:
+                        break
+                image_urls.extend(links)
 
-        article_urls = ImageScraper._gen_google_news_article_urls(
-            person_name, max_days_old=max_days_old
-        )
-        image_urls = ImageScraper._gen_image_urls_from_articles(article_urls)
+            image_urls = list(set(image_urls))
+            
+        elif download_source == "google_news":
+            article_urls = ImageScraper._gen_google_news_article_urls(
+                person_name, max_days_old=max_days_old
+            )
+            image_urls = ImageScraper._gen_image_urls_from_articles(article_urls)
+        else:
+            raise NotImplementedError("Only Google News or Google Images is supported.")
+
         return image_urls
 
+    @staticmethod
     def _load_url(link, photo_dir, i):
         """
         Downloads an image from `link` to `photo_dir` with id `i`.
@@ -158,12 +201,24 @@ class ImageScraper:
         filename = ImageScraper.get_image_filename(photo_dir, i, temp=True)
         try:
             urllib.request.urlretrieve(link, filename)
-            print(".", end="", flush=True)
         except:
             # We could potentially do better error handling here.
+            print(".", end="", flush=True)
             return None
+
+        # check for broken files
+        try:
+            with Image.open(filename) as img:
+                img.verify()  # Verify if it's a valid JPEG
+            # assert img.format in ["JPEG", "PNG"]  # TODO test and loosen restriction if needed
+        except:
+            print(".", end="", flush=True)
+            return None
+
+        print("✓", end="", flush=True)
         return (filename, link)
 
+    @staticmethod
     def _download_images_helper(photo_dir, urls):
         """
         Download the images from `urls` to `photo_dir` with increasing
@@ -174,7 +229,7 @@ class ImageScraper:
 
         # We can use a with statement to ensure threads are cleaned up promptly
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=ImageScraper.NUM_WORKERS
+                max_workers=ImageScraper.NUM_WORKERS
         ) as executor:
             # Start the load operations and mark each future with its URL
             futures = [
@@ -188,6 +243,8 @@ class ImageScraper:
 
         return output_files
 
+    # DEPRECATED
+    @staticmethod
     def _run_difpy(duplicate_photo_dir):
         # Run the difPy library with the lowest similarity threshold
         # (i.e., will detect the greatest # of duplicate pairs).
@@ -216,6 +273,65 @@ class ImageScraper:
 
         return orig_to_dups
 
+    @staticmethod
+    def _run_cnn(duplicate_photo_dir, min_similarity_threshold=0.9):
+        # Run the MobileNet model or other CNN to detect duplicates
+        model = MobileNet(input_shape=(224, 224, 3), include_top=False, pooling='avg')
+
+        data_generator = DataGenerator(
+            image_dir=duplicate_photo_dir,
+            batch_size=64,
+            target_size=(224, 224),
+        )
+
+        feat_vec = model.predict_generator(data_generator, len(data_generator))
+        
+        filenames = [str(i) for i in data_generator.valid_image_files]
+        # filenames = [i.name for i in data_generator.valid_image_files]
+
+        encoding_map = {j: feat_vec[i, :] for i, j in enumerate(filenames)}
+
+        # get all image ids
+        # we rely on dictionaries preserving insertion order in Python >=3.6
+        image_ids = np.array([*encoding_map.keys()])
+
+        # put image encodings into feature matrix
+        features = np.array([*encoding_map.values()])
+
+        cosine_scores = cosine_similarity(features)
+
+        np.fill_diagonal(
+            cosine_scores, 2.0
+        )  # allows to filter diagonal in results, 2 is a placeholder value
+
+        results = {}
+        for i, j in enumerate(cosine_scores):
+            duplicates_bool = (j >= min_similarity_threshold) & (j < 2)
+            duplicates = list(image_ids[duplicates_bool])
+            results[image_ids[i]] = duplicates
+
+        # Construct an undirected graph where edges
+        # represent duplicate images per difPy.
+        G = nx.Graph()
+        for orig, dups in results.items():
+            for dup in dups:
+                G.add_edge(orig, dup)
+
+        # Compute the connected components and select the highest
+        # quality image per component to keep in the dataset.
+        orig_to_dups = {}
+        cc = nx.connected_components(G)
+        for c in cc:
+            dups = set(c)
+            # This method of using st_size for quality is used
+            # originally in the difPy library.
+            orig = max(c, key=lambda f: os.stat(f).st_size)
+            dups.remove(orig)
+            orig_to_dups[orig] = dups
+
+        return orig_to_dups
+
+    @staticmethod
     def _remove_duplicates(photo_dir, downloads, duplicate_photo_dir):
         init_num_downloads = len(downloads)
 
@@ -234,8 +350,8 @@ class ImageScraper:
                 temp_filename.replace(photo_dir, temp_duplicate_photo_dir),
             )
 
-        # Run the DIF module after cd-ing into the duplicate directory.
-        orig_to_dups = ImageScraper._run_difpy(temp_duplicate_photo_dir)
+        # Run the CNN model after cd-ing into the duplicate directory.
+        orig_to_dups = ImageScraper._run_cnn(temp_duplicate_photo_dir)
 
         # Store the duplicate groups for post-analysis.
         all_dups = set()
@@ -281,6 +397,7 @@ class ImageScraper:
 
         return downloads
 
+    @staticmethod
     def _parse_downloads(photo_dir, downloads, min_photo_id):
         """
         Renumber images so the downloaded images are contiguous from
@@ -296,6 +413,7 @@ class ImageScraper:
             photos.append(Photo(photo_id, source_url))
         return photos
 
+    @staticmethod
     def get_image_filename(photo_dir, i, temp=False):
         """
         Returns a filename in `photo_dir` for the image with
@@ -304,14 +422,16 @@ class ImageScraper:
         prefix = "temp_" if temp else ""
         return f"{photo_dir}{os.sep}{prefix}{i:06}.jpg"
 
+    @staticmethod
     def download_images(
-        person_name,
-        photo_dir,
-        download_source,
-        min_photo_id,
-        max_number_of_photos=None,
-        duplicate_photo_dir=None,
-        scrape_articles_from_past_n_days=None,
+            person_name,
+            photo_dir,
+            download_source,
+            min_photo_id,
+            max_number_of_photos=None,
+            duplicate_photo_dir=None,
+            scrape_articles_from_past_n_days=None,
+            scraper_credentials=None
     ):
         """
         Returns a list of Photo's downloaded based on the config params.
@@ -319,16 +439,16 @@ class ImageScraper:
         Params:
         * person_name (str) is a search keyword, e.g., 'Ethan Mann'
         * photo_dir (str) is an existing dir for downloaded images
-        * download_source (enum) is the ImageSource to scrape from
+        * download_source (str) is the image source to scrape from
         * min_photo_id (int) is the first available idx for new filenames
         * max_number_of_photos (optional int) is the max number of downloads
         * duplicate_photo_dir (optional str) determines if dups are removed
         * scrape_articles_from_past_n_days (optional int) filters by pub date
         """
-        print(f"Scraping news articles for person {person_name}: ", end="", flush=True)
 
         urls = ImageScraper._gen_image_urls_for_person(
-            person_name, download_source, max_days_old=scrape_articles_from_past_n_days
+            person_name, download_source, max_days_old=scrape_articles_from_past_n_days,
+            scraper_credentials=scraper_credentials
         )
 
         # This is helpful for debugging
@@ -351,8 +471,13 @@ class ImageScraper:
         # Restore the default timeout for downloads.
         socket.setdefaulttimeout(None)
 
+        if not downloads:
+            print(f"No images for person {person_name}", end="", flush=True)
+            return []
+
+        print(f"Deduplicating...", end="", flush=True)
         # Remove duplicates
-        if duplicate_photo_dir is not None:
+        if duplicate_photo_dir is not None and len(downloads) > 1:
             downloads = ImageScraper._remove_duplicates(
                 photo_dir, downloads, duplicate_photo_dir
             )

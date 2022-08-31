@@ -1,6 +1,7 @@
 from PIL import Image, ImageOps
 from datetime import datetime
 import pandas as pd
+import numpy as np
 import shutil
 import os
 
@@ -11,17 +12,20 @@ from .face import DetectedFace, BoundingBox
 from .labeler import MatchType
 from .provider import ProviderType
 
+# Mutex / Semaphore for the threads to access the database
+from threading import Lock
+
 
 # Default file/dir names
-PERSON_CSV = "person"
-PHOTO_CSV = "photo"
-FACE_CSV = "face"
+PERSON_CSV = "person_meta"
+PHOTO_CSV = "photo_meta"
+DETECTION_CSV = "detections"
 BENCHMARK_CSV = "benchmark"
 PROVIDER_CSV = "provider"
 DATASET_CSV = "dataset"
 VERSION_CSV = "version"
 ANNOTATION_CSV = "annotation"
-RESULT_CSV = "result"
+MATCHES_CSV = "matches"
 PHOTO_DIR = "photo"
 DUPLICATE_PHOTO_DIR = "duplicate_photo"
 VERIFY_DATABASE_FILE = "database.info"
@@ -63,7 +67,7 @@ class Database:
 
         Benchmark 1 -> (Dataset 1, [Provider 1, Provider 2])
 
-    **face.csv:** face detections, e.g.,
+    **detections.csv:** face detections, e.g.,
 
         Face 1 -> Provider 1, 0001.jpg, bounding box 1
 
@@ -86,6 +90,11 @@ class Database:
         Provider 1, Face 1, Face 3 -> 0.13579
     """
 
+    # Locks / mutex for thread operations in the database
+    lock = Lock()
+    detection_lock = Lock()
+    comparison_lock = Lock()
+
     def __init__(self, path):
         """
         Loads an existing database from `path` if one exists.
@@ -107,17 +116,17 @@ class Database:
         # This method saves time and minimizes data loss in the event of a crash.
         self.results_cache = {
             "benchmark_id": [],
-            "face1_id": [],
-            "face2_id": [],
+            "bbox0_id": [],
+            "bbox1_id": [],
             "confidence": [],
         }
         self.detections_cache = {
-            "face_id": [],
+            "bbox_id": [],
             "photo_id": [],
             "person_id": [],
             "provider_id": [],
             "benchmark_id": [],
-            "bounding_box": [],
+            "bbox_coords": [],
             "metadata": [],
         }
 
@@ -168,7 +177,7 @@ class Database:
         which should only be true when the db is initialized.
         """
         subpath = self._get_subpath(csv_prefix)
-        df.to_csv(subpath, mode="a", header=header)
+        df.to_csv(subpath, mode="a", header=header, index=False)
 
     def _overwrite_df_to_db(self, csv_prefix, df):
         """
@@ -179,7 +188,7 @@ class Database:
         WARNING: this will erase the file `<csv_prefix>.csv`
         """
         subpath = self._get_subpath(csv_prefix)
-        df.to_csv(subpath, header=True)
+        df.to_csv(subpath, header=True, index=False)
 
     def _create_empty_database(self):
         """
@@ -195,8 +204,10 @@ class Database:
         new_df = pd.DataFrame(
             {
                 "person_id": [],
-                "person_name": [],
-            }
+                "name": [],
+                "race": [],
+                "gender": [],
+            }  # we might want to make this dynamic for any kind of meta data
         )
         self._append_df_to_db(PERSON_CSV, new_df, header=True)
 
@@ -214,6 +225,7 @@ class Database:
             {
                 "photo_id": [],
                 "source_url": [],
+                "query_person_id": [],
             }
         )
         self._append_df_to_db(PHOTO_CSV, new_df, header=True)
@@ -247,20 +259,20 @@ class Database:
 
         new_df = pd.DataFrame(
             {
-                "face_id": [],
+                "bbox_id": [],
                 "photo_id": [],
                 "person_id": [],
                 "provider_id": [],
                 "benchmark_id": [],
-                "bounding_box": [],
+                "bbox_coords": [],
                 "metadata": [],
             }
         )
-        self._append_df_to_db(FACE_CSV, new_df, header=True)
+        self._append_df_to_db(DETECTION_CSV, new_df, header=True)
 
         new_df = pd.DataFrame(
             {
-                "face_id": [],
+                "bbox_id": [],
                 "match_type": [],
             }
         )
@@ -269,12 +281,12 @@ class Database:
         new_df = pd.DataFrame(
             {
                 "benchmark_id": [],
-                "face1_id": [],
-                "face2_id": [],
+                "bbox0_id": [],
+                "bbox1_id": [],
                 "confidence": [],
             }
         )
-        self._append_df_to_db(RESULT_CSV, new_df, header=True)
+        self._append_df_to_db(MATCHES_CSV, new_df, header=True)
 
         # Empty folder for photos (no longer for faces or benchmark output).
         os.mkdir(self._get_subpath(PHOTO_DIR, csv=False))
@@ -286,13 +298,13 @@ class Database:
         """
         faces = {}
 
-        face_csv = pd.read_csv(self._get_subpath(FACE_CSV))
+        face_csv = pd.read_csv(self._get_subpath(DETECTION_CSV))
         num_faces = len(face_csv)
         for i in range(num_faces):
             # For each face, load the bounding box into a `BoundingBox`
             # and create the `DetectedFace` data structure.
             face_row = face_csv.iloc[i]
-            face_id = face_row["face_id"]
+            bbox_id = face_row["bbox_id"]
             benchmark_id = face_row["benchmark_id"]
             person_id = face_row["person_id"]
             photo_id = face_row["photo_id"]
@@ -309,8 +321,8 @@ class Database:
                 benchmark_id,
                 metadata=metadata,
             )
-            face.set_face_id(face_id)
-            faces[face_id] = face
+            face.set_face_id(bbox_id)
+            faces[bbox_id] = face
         return faces
 
     def _load_database(self):
@@ -320,7 +332,7 @@ class Database:
         """
         # Read in from person.csv to load self.people
         people_csv = pd.read_csv(self._get_subpath(PERSON_CSV))
-        for person_id, person_name in enumerate(people_csv["person_name"]):
+        for person_id, person_name in enumerate(people_csv["name"]):
             self.people.append(Person(person_name, person_id))
 
         # Read in from photo.csv to load each Version
@@ -339,7 +351,10 @@ class Database:
 
             # Process the photo ids in this version and add
             # a Photo to the version for each photo id.
-            photo_ids = self._cast_str_to_ints(version_row["photo_ids"])
+            try:
+                photo_ids = self._cast_str_to_ints(version_row["photo_ids"])
+            except:
+                photo_ids = []
             for photo_id in photo_ids:
                 photo_row = photo_csv.iloc[photo_id]
                 assert photo_row["photo_id"] == photo_id
@@ -391,28 +406,28 @@ class Database:
         for i in range(len((annotation_csv))):
             # Load each annotation into a lookup table by face id.
             annotation_row = annotation_csv.iloc[i]
-            face_id = annotation_row["face_id"]
+            bbox_id = annotation_row["bbox_id"]
             match_type = annotation_row["match_type"]
             match_enum = MatchType(match_type)
-            face_id_to_annotation[face_id] = match_enum
+            face_id_to_annotation[bbox_id] = match_enum
 
-        face_id_to_provider = {}
-        face_id_to_person_id = {}
-        face_csv = pd.read_csv(self._get_subpath(FACE_CSV))
+        bbox_id_to_provider = {}
+        bbox_id_to_person_id = {}
+        face_csv = pd.read_csv(self._get_subpath(DETECTION_CSV))
         num_faces = len(face_csv)
         self.num_faces = num_faces
         for i in range(num_faces):
             # For each face, load the bounding box into a `BoundingBox`
             # and create the `DetectedFace` data structure.
             face_row = face_csv.iloc[i]
-            face_id = face_row["face_id"]
+            bbox_id = face_row["bbox_id"]
             benchmark_id = face_row["benchmark_id"]
             person_id = face_row["person_id"]
             photo_id = face_row["photo_id"]
             provider_id = face_row["provider_id"]
             provider_enum = ProviderType(provider_id)
             metadata = face_row["metadata"]
-            bounding_box_args = self._cast_str_to_ints(face_row["bounding_box"])
+            bounding_box_args = self._cast_str_to_ints(face_row["bbox_coords"])
             bounding_box = BoundingBox(*bounding_box_args)
             face = DetectedFace(
                 photo_id,
@@ -423,11 +438,11 @@ class Database:
                 metadata=metadata,
             )
             # Also, update the table mapping face ids to person ids
-            face_id_to_person_id[face_id] = person_id
+            bbox_id_to_person_id[bbox_id] = person_id
             # Then apply the annotations, where applicable.
-            face.set_face_id(face_id)
-            if face_id in face_id_to_annotation:
-                face.annotate(face_id_to_annotation[face_id])
+            face.set_face_id(bbox_id)
+            if bbox_id in face_id_to_annotation:
+                face.annotate(face_id_to_annotation[bbox_id])
             # Finally, add this face to the appropriate provider,
             # under the appropriate photo id.
             for provider in self.benchmarks[benchmark_id].providers:
@@ -436,23 +451,26 @@ class Database:
                         photo_id, []
                     ) + [face]
                     # Also, update the table mapping face ids to providers
-                    face_id_to_provider[face_id] = provider
+                    bbox_id_to_provider[bbox_id] = provider
                     break
 
-        result_csv = pd.read_csv(self._get_subpath(RESULT_CSV))
+        result_csv = pd.read_csv(self._get_subpath(MATCHES_CSV))
         num_results = len(result_csv)
         for i in range(num_results):
             # For each comparison, load the data into the appropriate provider.
             result_row = result_csv.iloc[i]
             benchmark_id = result_row["benchmark_id"]
-            face1_id = int(result_row["face1_id"])
-            face2_id = int(result_row["face2_id"])
+            try:
+                face1_id = int(result_row["bbox0_id"])
+                face2_id = int(result_row["bbox1_id"])
+            except:
+                continue
             confidence = result_row["confidence"]
-            provider = face_id_to_provider[face1_id]
-            same_provider = face_id_to_provider[face2_id]
+            provider = bbox_id_to_provider[face1_id]
+            same_provider = bbox_id_to_provider[face2_id]
             assert provider == same_provider
-            person1_id = face_id_to_person_id[face1_id]
-            person2_id = face_id_to_person_id[face2_id]
+            person1_id = bbox_id_to_person_id[face1_id]
+            person2_id = bbox_id_to_person_id[face2_id]
             key = ((face1_id, person1_id), (face2_id, person2_id))
             provider.comparisons[key] = confidence
 
@@ -469,7 +487,7 @@ class Database:
                 return idx
         return -1
 
-    def _add_photos(self, photos):
+    def _add_photos(self, photos, person_id):
         """
         Adds a list of photos to the db.
         Unlike self._add_photo, this is a single append op.
@@ -489,11 +507,12 @@ class Database:
             {
                 "photo_id": new_ids,
                 "source_url": source_urls,
+                "query_person_id": [person_id] * len(new_ids),
             }
         )
         self._append_df_to_db(PHOTO_CSV, new_df)
 
-    def _add_photo(self, photo):
+    def _add_photo(self, photo, person_id):
         """
         Adds a photo to the db.
         Note that source_url is None if the photo is a local upload.
@@ -506,6 +525,7 @@ class Database:
             {
                 "photo_id": [new_id],
                 "source_url": [photo.source_url],
+                "query_person_id": [person_id],
             }
         )
         self._append_df_to_db(PHOTO_CSV, new_df)
@@ -569,6 +589,7 @@ class Database:
         max_number_of_photos=None,
         remove_duplicate_images=False,
         scrape_articles_from_past_n_days=None,
+        scraper_credentials=None,
     ):
         """
         Curate photos from a source. The download source options
@@ -587,10 +608,9 @@ class Database:
             download_source,
             min_photo_id,
             max_number_of_photos=max_number_of_photos,
-            duplicate_photo_dir=duplicate_photo_dir
-            if remove_duplicate_images
-            else None,
+            duplicate_photo_dir=duplicate_photo_dir if remove_duplicate_images else None,
             scrape_articles_from_past_n_days=scrape_articles_from_past_n_days,
+            scraper_credentials=scraper_credentials
         )
         return photos
 
@@ -598,20 +618,21 @@ class Database:
         """
         Returns an id for a DetectedFace. Updates the csv and DetectedFace.
         """
-        new_face_id = self.num_faces
-        self.num_faces += 1
-        detected_face.set_face_id(new_face_id)
+        with self.detection_lock:
+            new_bbox_id = self.num_faces
+            self.num_faces += 1
+            detected_face.set_face_id(new_bbox_id)
 
-        self.detections_cache["face_id"].append(new_face_id)
-        self.detections_cache["photo_id"].append(detected_face.photo_id)
-        self.detections_cache["person_id"].append(detected_face.person_id)
-        self.detections_cache["provider_id"].append(detected_face.provider.value)
-        self.detections_cache["benchmark_id"].append(detected_face.benchmark_id)
-        self.detections_cache["bounding_box"].append(
-            self._cast_ints_to_str(detected_face.bounding_box.bbox)
-        )
-        self.detections_cache["metadata"].append(detected_face.metadata)
-        return new_face_id
+            self.detections_cache["bbox_id"].append(new_bbox_id)
+            self.detections_cache["photo_id"].append(detected_face.photo_id)
+            self.detections_cache["person_id"].append(detected_face.person_id)
+            self.detections_cache["provider_id"].append(detected_face.provider.value)
+            self.detections_cache["benchmark_id"].append(detected_face.benchmark_id)
+            self.detections_cache["bbox_coords"].append(
+                    self._cast_ints_to_str(detected_face.bounding_box.bbox)
+                )
+            self.detections_cache["metadata"].append(detected_face.metadata)
+        return new_bbox_id
 
     def _save_face_annotation(self, face):
         """
@@ -627,63 +648,75 @@ class Database:
         )
         self._append_df_to_db(ANNOTATION_CSV, new_df)
 
+    def _remove_detections(self, photos):
+        subpath = self._get_subpath(DETECTION_CSV)
+        df = pd.read_csv(subpath)
+        for photo_id in photos:
+            df.drop(df.index[(df["photo_id"] == photo_id)],axis=0,inplace=True)
+        # We would have to reload the database
+        # df['face_id'] = np.arange(df.shape[0])
+        self._overwrite_df_to_db(DETECTION_CSV, df)
+
     def _flush_detections(self):
         """
         Writes the pending set of detected faces to csv.
         Then resets the cache.
         """
-        new_df = pd.DataFrame(
-            {
-                "face_id": self.detections_cache["face_id"],
-                "photo_id": self.detections_cache["photo_id"],
-                "person_id": self.detections_cache["person_id"],
-                "provider_id": self.detections_cache["provider_id"],
-                "benchmark_id": self.detections_cache["benchmark_id"],
-                "bounding_box": self.detections_cache["bounding_box"],
-                "metadata": self.detections_cache["metadata"],
-            }
-        )
-        self._append_df_to_db(FACE_CSV, new_df)
+        with self.detection_lock:
+            new_df = pd.DataFrame(
+                {
+                    "bbox_id": self.detections_cache["bbox_id"],
+                    "photo_id": self.detections_cache["photo_id"],
+                    "person_id": self.detections_cache["person_id"],
+                    "provider_id": self.detections_cache["provider_id"],
+                    "benchmark_id": self.detections_cache["benchmark_id"],
+                    "bbox_coords": self.detections_cache["bbox_coords"],
+                    "metadata": self.detections_cache["metadata"],
+                }
+            )
+            self._append_df_to_db(DETECTION_CSV, new_df)
 
-        self.detections_cache = {
-            "face_id": [],
-            "photo_id": [],
-            "person_id": [],
-            "provider_id": [],
-            "benchmark_id": [],
-            "bounding_box": [],
-            "metadata": [],
-        }
+            self.detections_cache = {
+                "bbox_id": [],
+                "photo_id": [],
+                "person_id": [],
+                "provider_id": [],
+                "benchmark_id": [],
+                "bbox_coords": [],
+                "metadata": [],
+            }
 
     def _flush_results(self):
         """
         Saves all pending results to the backing data structure.
         """
-        new_df = pd.DataFrame(
-            {
-                "benchmark_id": self.results_cache["benchmark_id"],
-                "face1_id": self.results_cache["face1_id"],
-                "face2_id": self.results_cache["face2_id"],
-                "confidence": self.results_cache["confidence"],
+        with self.comparison_lock:
+            new_df = pd.DataFrame(
+                {
+                    "benchmark_id": self.results_cache["benchmark_id"],
+                    "bbox0_id": self.results_cache["bbox0_id"],
+                    "bbox1_id": self.results_cache["bbox1_id"],
+                    "confidence": self.results_cache["confidence"],
+                }
+            )
+            self._append_df_to_db(MATCHES_CSV, new_df)
+
+            self.results_cache = {
+                "benchmark_id": [],
+                "bbox0_id": [],
+                "bbox1_id": [],
+                "confidence": [],
             }
-        )
-        self._append_df_to_db(RESULT_CSV, new_df)
 
-        self.results_cache = {
-            "benchmark_id": [],
-            "face1_id": [],
-            "face2_id": [],
-            "confidence": [],
-        }
-
-    def _add_result(self, benchmark_id, face1_id, face2_id, confidence):
+    def _add_result(self, benchmark_id, bbox0_id, bbox1_id, confidence):
         """
         Saves a comparison result to the backing data structure.
         """
-        self.results_cache["benchmark_id"].append(benchmark_id)
-        self.results_cache["face1_id"].append(face1_id)
-        self.results_cache["face2_id"].append(face2_id)
-        self.results_cache["confidence"].append(confidence)
+        with self.comparison_lock:
+            self.results_cache["benchmark_id"].append(benchmark_id)
+            self.results_cache["bbox0_id"].append(bbox0_id)
+            self.results_cache["bbox1_id"].append(bbox1_id)
+            self.results_cache["confidence"].append(confidence)
 
     def _delete_database(self, force=False):
         """
@@ -697,6 +730,31 @@ class Database:
                 return
         shutil.rmtree(self.path)
         print("Database deleted.")
+
+    def get_photos_faces(self):
+        """
+        Needed to make the conversion from face_id to photo_id
+        """
+        photo_to_face = {}
+        face_to_photo = {}
+
+        face_csv = pd.read_csv(self._get_subpath(DETECTION_CSV))
+        num_faces = len(face_csv)
+        for i in range(num_faces):
+            face_row = face_csv.iloc[i]
+            face_id = face_row["face_id"]
+            photo_id = face_row["photo_id"]
+
+            photo = photo_to_face.get(photo_id, None)
+            if photo:
+                photo.add(face_id)
+                photo_to_face[photo_id] = photo
+            else:
+                photo_to_face[photo_id] = {face_id}
+
+            face_to_photo[face_id] = photo_id
+
+        return photo_to_face, face_to_photo
 
     def get_person_id(self, person_name):
         """
@@ -714,7 +772,7 @@ class Database:
             raise KeyError("This person is not in the db.")
         return person_id
 
-    def add_person(self, person_name):
+    def add_person(self, person_name, **person_kwargs):
         """
         Adds a person to the database.
 
@@ -733,11 +791,14 @@ class Database:
             person_id = len(self.people)
             self.people.append(Person(person_name, person_id))
 
+            kwarg_dict = {key: [value] for key, value in person_kwargs.items()}
+
             # Append the Person's data to the filesystem db.
             new_df = pd.DataFrame(
                 {
                     "person_id": [person_id],
-                    "person_name": [person_name],
+                    "name": [person_name],
+                    **kwarg_dict
                 }
             )
             self._append_df_to_db(PERSON_CSV, new_df)
@@ -771,6 +832,7 @@ class Database:
         max_number_of_photos=None,
         remove_duplicate_images=False,
         scrape_articles_from_past_n_days=None,
+        scraper_credentials=None,
     ):
         """
         Add a version to a person indexed at person_id.
@@ -778,7 +840,7 @@ class Database:
         Args:
             person_id (int): id of the person in the db
             upload_path (None | str): path to the source of images
-            download_source (None | ImageSource):
+            download_source (None | str):
             max_number_of_photos (None | int)
 
         Returns:
@@ -794,6 +856,10 @@ class Database:
 
         person = self.get_person(person_id)
 
+        ## Don't want to create a new version
+        # if len(person.versions) != 0:
+        #     return person.get_last_version_id()
+
         if use_upload == use_download:
             raise TypeError("Upload and download cannot both be specified.")
         elif use_download:
@@ -803,9 +869,10 @@ class Database:
                 max_number_of_photos=max_number_of_photos,
                 remove_duplicate_images=remove_duplicate_images,
                 scrape_articles_from_past_n_days=scrape_articles_from_past_n_days,
+                scraper_credentials=scraper_credentials,
             )
-            if len(photos) == 0:
-                raise Exception("No images were downloaded. Try again.")
+            # if len(photos) == 0:
+            #     raise Exception("No images were downloaded. Try again.")
         elif use_upload:
             photos = self._add_version_from_upload(
                 person_id,
@@ -824,7 +891,7 @@ class Database:
             photo_ids.append(photo.get_photo_id())
 
         # Process the photos in a batch.
-        self._add_photos(photos)
+        self._add_photos(photos, person_id)
 
         photo_ids = self._cast_ints_to_str(photo_ids)
         version_id = person.add_version(new_version)

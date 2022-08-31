@@ -1,4 +1,5 @@
 # Microsoft API imports
+import time
 import sys
 from msrest.authentication import CognitiveServicesCredentials
 from azure.cognitiveservices.vision.face import FaceClient
@@ -11,6 +12,7 @@ import random
 import numpy as np
 import traceback
 import requests
+import base64
 
 from .face import BoundingBox, DetectedFace
 from .dataset import Photo
@@ -21,21 +23,25 @@ class ProviderType(Enum):
     TEST_PROVIDER = 0
     # Realistic random (normal distributions of confidence for match/nonmatch)
     TEST_PROVIDER_V2 = 1
-    # Realistic random with different parameters
-    TEST_PROVIDER_V3 = 2
     # Various industry providers
-    MICROSOFT_AZURE = 3
-    AMAZON_AWS = 4
+    CLOUDMERSIVE = 2 # not used
+    MICROSOFT_AZURE = 3 # not used
+    AMAZONAWS = 4
     TUYA = 5  # not used
-    FACE_PLUS_PLUS = 6
+    FACEPLUSPLUS = 6
     MXFACE = 7  # not used
+    CLEARVIEW = 8
+    
 
 
 PROVIDER_TO_LABEL = {
     ProviderType.TEST_PROVIDER: "Pytest",
     ProviderType.MICROSOFT_AZURE: "Azure",
-    ProviderType.AMAZON_AWS: "AWS",
-    ProviderType.FACE_PLUS_PLUS: "Face++",
+    ProviderType.AMAZONAWS: "Amazon Rekognition",
+    ProviderType.FACEPLUSPLUS: "Face++",
+    ProviderType.MXFACE: "MXFace",
+    ProviderType.CLEARVIEW: "Clearview",
+    ProviderType.CLOUDMERSIVE: "Cloudmersive",
 }
 
 
@@ -57,10 +63,11 @@ def gen_provider_class(provider_enum):
     enum_to_class_map = {
         ProviderType.TEST_PROVIDER: TestProvider,
         ProviderType.TEST_PROVIDER_V2: RealisticTestProvider,
-        ProviderType.TEST_PROVIDER_V3: RealisticTestProviderV2,
         ProviderType.MICROSOFT_AZURE: MicrosoftAzure,
-        ProviderType.AMAZON_AWS: AmazonAWS,
-        ProviderType.FACE_PLUS_PLUS: FacePlusPlus,
+        ProviderType.AMAZONAWS: AmazonAWS,
+        ProviderType.FACEPLUSPLUS: FacePlusPlus,
+        ProviderType.CLEARVIEW: Clearview,
+        ProviderType.CLOUDMERSIVE: Cloudmersive,
     }
     return enum_to_class_map[provider_enum]
 
@@ -95,13 +102,15 @@ class Provider:
             count += len(photo_faces)
         return count
 
-    def get_detected_face_sameid_counts(self, photo_id_has_single_face=None):
+    def get_detected_face_sameid_counts(self, photo_id_has_single_face=None, group=None):
         person_to_face_count = {}
         for face in self.get_all_detected_faces():
             if not photo_id_has_single_face(face.photo_id):
                 continue
 
             person_id = face.person_id
+            if group:
+                if person_id not in group: continue
             if person_id not in person_to_face_count:
                 person_to_face_count[person_id] = 0
             person_to_face_count[person_id] += 1
@@ -127,7 +136,7 @@ class Provider:
         """
         return str(self.provider_enum).split(".")[1]
 
-    def detect_faces(self, benchmark_id, person_id, photo):
+    def detect_faces(self, benchmark_id, person_id, photo, skip=False):
         """
         Detects faces in a photo for a single cloud provider.
 
@@ -142,18 +151,21 @@ class Provider:
         # call (the child class's implementation of _detect_faces).
         key = photo.get_photo_id()
         if not key in self.detected_faces:
-            try:
-                faces = self._detect_faces(benchmark_id, person_id, photo)
-            except Exception as err:
-                print(
-                    f"Exception in provider _detect_faces for photo {key}:",
-                    file=sys.stderr,
-                )
-                traceback.print_tb(err.__traceback__)
-                return
-            self.detected_faces[key] = faces
-            for face in faces:
-                self.database._add_detected_face(face)
+            if skip:
+                self.detected_faces[key] = []
+            else:
+                try:
+                    faces = self._detect_faces(benchmark_id, person_id, photo)
+                except Exception as err:
+                    #print(
+                    #    f"Exception in provider _detect_faces for photo {key}:",
+                    #    file=sys.stderr,
+                    #)
+                    #traceback.print_tb(err.__traceback__)
+                    return
+                self.detected_faces[key] = faces
+                for face in faces:
+                    self.database._add_detected_face(face)
         return self.detected_faces[key]
 
     def compare_faces(self, detected_face1, detected_face2):
@@ -167,6 +179,10 @@ class Provider:
             (detected_face1.face_id, detected_face1.person_id),
             (detected_face2.face_id, detected_face2.person_id),
         )
+        
+        if detected_face2.face_id % 10 == 0:
+        #    print(f"Comparison ({detected_face1.face_id},{detected_face2.face_id}) {provider_to_label(self.provider_enum)}")
+            self.database._flush_results()
 
         # If the flip of the faces was computed, don't compute again
         # or even store the new result.
@@ -182,11 +198,15 @@ class Provider:
                     f"Exception in provider _compare_faces for {detected_face1.face_id} and {detected_face2.face_id}:",
                     file=sys.stderr,
                 )
+                print(err, file=sys.stderr)
                 traceback.print_tb(err.__traceback__)
+                # print(".", end="", flush=True)
                 return
             self.comparisons[key] = confidence
             benchmark_id = detected_face1.benchmark_id
+#            print("Debería añadirse a la base de datos", file=sys.stderr)
             self.database._add_result(benchmark_id, key[0][0], key[1][0], confidence)
+        #print("✓", end="", flush=True)
         return self.comparisons[key]
 
     def _compare_faces(self, detected_face1, detected_face2):
@@ -244,29 +264,6 @@ class RealisticTestProvider(TestProvider):
         return draw
 
 
-class RealisticTestProviderV2(TestProvider):
-    def __init__(self, database, credentials):
-        Provider.__init__(self, database, ProviderType.TEST_PROVIDER_V3, credentials)
-
-    def _compare_faces(self, detected_face1, detected_face2):
-        if detected_face1.person_id == detected_face2.person_id:
-            # Return from a normal probability distribution such
-            # that two same-id faces have high confidence of being the same.
-            mean = 0.9
-            sd = 0.1
-        else:
-            # Return from a normal probability distribution such
-            # that two diff-id faces have low confidence of being the same.
-            mean = 0.2
-            sd = 0.3
-
-        # Truncate the distribution to fit within [0,1]
-        draw = None
-        while draw is None or draw < 0 or draw > 1:
-            draw = np.random.normal(mean, sd)
-        return draw
-
-
 class MicrosoftAzure(Provider):
     def __init__(self, database, credentials):
         super().__init__(database, ProviderType.MICROSOFT_AZURE, credentials)
@@ -276,6 +273,35 @@ class MicrosoftAzure(Provider):
             CognitiveServicesCredentials(self.credentials["key"]),
         )
 
+        response = requests.get(
+            url = self.credentials["endpoint"] + 'face/v1.0/largefacelists',
+            headers = {
+                    # Request headers
+                    'Content-Type': 'application/json',
+                    'Ocp-Apim-Subscription-Key': self.credentials["key"],
+                },
+        )
+
+        print(" First   ", response.status_code)
+        print(" First   ", response.content)
+
+        if len(response.json()) == 0:
+            response = requests.put(
+                url = self.credentials["endpoint"] + 'face/v1.0/largefacelists/cfrto',
+                headers = {
+                        # Request headers
+                        'Content-Type': 'application/json',
+                        'Ocp-Apim-Subscription-Key': self.credentials["key"],
+                    },
+                params = {
+                        # Request parameters
+                        'name': 'first',
+                    },
+            )
+
+            print(" Second   ", response.status_code)
+            print(" Second   ", response.content)
+
     def _compare_faces(self, detected_face1, detected_face2):
         microsoft_id1 = detected_face1.metadata
         microsoft_id2 = detected_face2.metadata
@@ -284,25 +310,42 @@ class MicrosoftAzure(Provider):
         ).confidence
 
     def _detect_faces(self, benchmark_id, person_id, photo):
-        microsoft_faces = self.client.face.detect_with_stream(
-            photo.load_as_stream(self.database)
+        response = requests.post(
+            url = self.credentials["endpoint"] + 'face/v1.0/largefacelists/cfrto/persistedfaces',
+            headers = {
+                    # Request headers
+                    'Content-Type': 'application/octet-stream',
+                    'Ocp-Apim-Subscription-Key': self.credentials["key"],
+                },
+            params = {
+                    # Request parameters
+                    'returnFaceId': 'false',
+                    'detectionModel': 'detection_03',
+                },
+            data = photo.load_as_stream(self.database).read(),
         )
+
+        print(" Detect Face  ", response.status_code, response.content)
+
+        exit(1)
+
+        microsoft_faces = response.json()
 
         return [
             DetectedFace(
                 photo.get_photo_id(),
                 person_id,
                 BoundingBox(
-                    microsoft_face.face_rectangle.left,
-                    microsoft_face.face_rectangle.top,
-                    microsoft_face.face_rectangle.width
-                    + microsoft_face.face_rectangle.left,
-                    microsoft_face.face_rectangle.height
-                    + microsoft_face.face_rectangle.top,
+                    microsoft_face["faceRectangle"]["left"],
+                    microsoft_face["faceRectangle"]["top"],
+                    microsoft_face["faceRectangle"]["width"]
+                    + microsoft_face["faceRectangle"]["left"],
+                    microsoft_face["faceRectangle"]["height"]
+                    + microsoft_face["faceRectangle"]["top"],
                 ),
                 self.provider_enum,
                 benchmark_id,
-                metadata=microsoft_face.face_id,
+                # metadata=microsoft_face.face_id,
             )
             for microsoft_face in microsoft_faces
         ]
@@ -310,7 +353,7 @@ class MicrosoftAzure(Provider):
 
 class AmazonAWS(Provider):
     def __init__(self, database, credentials):
-        super().__init__(database, ProviderType.AMAZON_AWS, credentials)
+        super().__init__(database, ProviderType.AMAZONAWS, credentials)
 
         self.client = boto3.client(
             "rekognition",
@@ -377,11 +420,11 @@ class AmazonAWS(Provider):
             },
         )
 
-        err_message = f"Multiple faces detected in {detected_face1.face_id} vs {detected_face2.face_id}, but only 1 face is present in each image..."
+        err_message = f"Multiple ({len(response['FaceMatches'])}) faces detected in {detected_face1.photo_id} vs {detected_face2.photo_id}, but only 1 face is present in each image..."
         assert len(response["FaceMatches"]) <= 1, err_message
 
         # For now, also assume that no pair of faces will ever return exactly 0
-        err_message = f"No faces detected in {detected_face1.face_id} vs {detected_face2.face_id}, but 1 face is present in each image..."
+        err_message = f"No faces detected in {detected_face1.photo_id} vs {detected_face2.photo_id}, but 1 face is present in each image..."
         assert len(response["FaceMatches"]) >= 1, err_message
 
         return response["FaceMatches"][0]["Similarity"] / 100
@@ -389,7 +432,7 @@ class AmazonAWS(Provider):
 
 class FacePlusPlus(Provider):
     def __init__(self, database, credentials):
-        super().__init__(database, ProviderType.FACE_PLUS_PLUS, credentials)
+        super().__init__(database, ProviderType.FACEPLUSPLUS, credentials)
 
     def _detect_faces(self, benchmark_id, person_id, photo):
         response = requests.post(
@@ -403,9 +446,14 @@ class FacePlusPlus(Provider):
             ),
         )
 
-        response = response.json()
+        while True:
+            response = response.json()
 
-        assert "faces" in response, response
+            if "error_message" in response and "CONCURRENCY_LIMIT_EXCEEDED" in response["error_message"]:
+                time.sleep(1)
+            else:
+                assert "faces" in response
+                break
 
         detected_faces = []
         for face in response["faces"]:
@@ -430,18 +478,218 @@ class FacePlusPlus(Provider):
         return detected_faces
 
     def _compare_faces(self, detected_face1, detected_face2):
-        face_token1 = detected_face1.metadata
-        face_token2 = detected_face2.metadata
+        # # When more than 72h have passed face_token is lost
+        # face_token1 = detected_face1.metadata
+        # face_token2 = detected_face2.metadata
+
+        # response = requests.post(
+        #     "https://api-us.faceplusplus.com/facepp/v3/compare",
+        #     params=dict(
+        #         api_key=self.credentials["endpoint"],
+        #         api_secret=self.credentials["key"],
+        #         face_token1=face_token1,
+        #         face_token2=face_token2,
+        #     ),
+        # )
+
+        while True:
+            response = requests.post(
+                "https://api-us.faceplusplus.com/facepp/v3/compare",
+                params=dict(
+                    api_key=self.credentials["endpoint"],
+                    api_secret=self.credentials["key"],
+                ),
+                files=dict(
+                    image_file1=Photo(detected_face1.photo_id, None).load_as_bytes(self.database),
+                    image_file2=Photo(detected_face2.photo_id, None).load_as_bytes(self.database),
+                ),
+            ).json()
+
+            if "error_message" in response and "CONCURRENCY_LIMIT_EXCEEDED" in response["error_message"]:
+                time.sleep(1)
+            else:
+                assert "confidence" in response
+                break
+
+        confidence = response["confidence"]
+        return confidence / 100
+        
+        
+class Clearview(Provider):
+    def __init__(self, database, credentials):
+        super().__init__(database, ProviderType.CLEARVIEW, credentials)
+
+    def _detect_faces(self, benchmark_id, person_id, photo):
+    
+        response = requests.post(
+            url = "https://developers.clearview.ai/v1/detect_image",
+            headers = { "Authorization": "Bearer " + self.credentials["key"] },
+            data = {
+                'all_faces': True,
+                'image': 'data:image/jpeg;base64,' + base64.b64encode(photo.load_as_bytes(self.database)).decode("ascii"),
+            }
+        )
+        response = response.json()
+        
+        detected_faces = []
+        for item in response["data"]["items"]:
+            if "face" != item["kind"]:
+                continue
+                
+            bbox = item["bounding_box"]
+
+            left = bbox[0]
+            top = bbox[1]
+            right = bbox[2] + bbox[0]
+            bottom = bbox[3] + bbox[1]
+
+            detected_faces.append(
+                DetectedFace(
+                    photo.get_photo_id(),
+                    person_id,
+                    BoundingBox(left, top, right, bottom),
+                    self.provider_enum,
+                    benchmark_id,
+                )
+            )
+
+        return detected_faces
+
+    def _compare_faces(self, detected_face1, detected_face2):
+        face1 = detected_face1.crop(self.database, skip_padding=True, return_base64=True)
+        face2 = detected_face2.crop(self.database, skip_padding=True, return_base64=True)
+        
+        response = requests.post(
+            url="https://developers.clearview.ai/v1/compare_images",
+            headers = { "Authorization": "Bearer " + self.credentials["key"] },
+            data = {
+                'image_a': 'data:image/jpeg;base64,' + face1, 
+                'image_b': 'data:image/jpeg;base64,' + face2,
+            }
+        )
+
+        if "data" not in response.json():
+            print(response.json())
+        elif "similarity" not in response.json()["data"]:
+            print(response.json()["data"])
+        
+        return response.json()["data"]["similarity"]
+
+
+class Cloudmersive(Provider):
+    def __init__(self, database, credentials):
+        super().__init__(database, ProviderType.CLOUDMERSIVE, credentials)
+
+    def _detect_faces(self, benchmark_id, person_id, photo):
+    
+        response = requests.post(
+            url = "https://api.cloudmersive.com/image/face/locate",
+            headers = { "Content-Type": "multipart/form-data", "Apikey" : self.credentials["key"]},
+            form = {
+                'imageFile': 'data:image/jpeg;base64,' + base64.b64encode(photo.load_as_bytes(self.database)).decode("ascii"),
+            }
+        )
 
         response = requests.post(
-            "https://api-us.faceplusplus.com/facepp/v3/compare",
+            "https://api-us.faceplusplus.com/facepp/v3/detect",
             params=dict(
                 api_key=self.credentials["endpoint"],
                 api_secret=self.credentials["key"],
-                face_token1=face_token1,
-                face_token2=face_token2,
+            ),
+            files=dict(
+                image_file=photo.load_as_bytes(self.database),
             ),
         )
 
-        confidence = response.json()["confidence"]
-        return confidence / 100
+        response = response.json()
+        
+        detected_faces = []
+        for item in response["data"]["items"]:
+            if "face" != item["kind"]:
+                continue
+                
+            bbox = item["bounding_box"]
+
+            left = bbox[0]
+            top = bbox[1]
+            right = bbox[2] + bbox[0]
+            bottom = bbox[3] + bbox[1]
+
+            detected_faces.append(
+                DetectedFace(
+                    photo.get_photo_id(),
+                    person_id,
+                    BoundingBox(left, top, right, bottom),
+                    self.provider_enum,
+                    benchmark_id,
+                )
+            )
+
+        return detected_faces
+
+    def _compare_faces(self, detected_face1, detected_face2):
+        face1 = detected_face1.crop(self.database, skip_padding=True, return_base64=True)
+        face2 = detected_face2.crop(self.database, skip_padding=True, return_base64=True)
+        
+        response = requests.post(
+            url="https://developers.clearview.ai/v1/compare_images",
+            headers = { "Authorization": "Bearer " + self.credentials["key"] },
+            data = {
+                'image_a': 'data:image/jpeg;base64,' + face1, 
+                'image_b': 'data:image/jpeg;base64,' + face2,
+            }
+        )
+        
+        return response.json()["data"]["similarity"]
+
+class MXFace(Provider):
+    def __init__(self, database, credentials):
+        super().__init__(database, ProviderType.MXFACE, credentials)
+
+    def _detect_faces(self, benchmark_id, person_id, photo):
+    
+        response = requests.post(
+            url = "https://faceapi.mxface.ai/api/v2/face/detect",
+            headers = { "Subscriptionkey" : self.credentials["key"] },
+            data = {
+                'encoded_image': base64.b64encode(photo.load_as_bytes(self.database)).decode("ascii"),
+            }
+            # params
+        )
+        response = response.json()
+        
+        detected_faces = []
+        for face in response["faces"]:                
+            bbox = face["faceRectangle"]
+
+            left = bbox["x"]
+            top = bbox["y"]
+            right = bbox["x"] + bbox["width"]
+            bottom = bbox["y"] + bbox["height"]
+
+            detected_faces.append(
+                DetectedFace(
+                    photo.get_photo_id(),
+                    person_id,
+                    BoundingBox(left, top, right, bottom),
+                    self.provider_enum,
+                    benchmark_id,
+                )
+            )
+
+        return detected_faces
+
+    def _compare_faces(self, detected_face1, detected_face2):
+        face1 = detected_face1.crop(self.database, skip_padding=True, return_base64=True)
+        face2 = detected_face2.crop(self.database, skip_padding=True, return_base64=True)
+        
+        response = requests.post(
+            url="https://faceapi.mxface.ai/api/v2/face/verify",
+            headers = { "Subscriptionkey" : self.credentials["key"] },
+            data = {
+                'encoded_image1': face1, 
+                'encoded_image2': face2,
+            }
+        )
+        
+        return response.json()["confidence"]
