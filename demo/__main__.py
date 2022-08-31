@@ -22,19 +22,30 @@ else:
 benchmark = CFRO(
     label_faces=True,
     names_path="names.csv",
-    providers_path="providers.csv",
-    constants_config_path="config.ini",
+    providers_path="../services.yaml",
+    scraper_path="../scrapers.yaml",
     database_path="demo_data",
-    max_number_of_photos=50,
+    image_source="google_images",  # Options: "google_images", "google_news"
+    max_number_of_photos=100,
     subsampling_seed=2022,
+    apply_majority_vote=True
 )
 
 # # Run the entire benchmark.
 # benchmark.run()
 
 # Run the benchmark step by step.
+
 benchmark.load_photos()
+
 benchmark.detect_faces()
-benchmark.label_detected_faces()
+
 benchmark.compare_faces()
-benchmark.analyze()
+
+benchmark.label_detected_faces()
+
+benchmark.analyze(
+    create_pdf_report=True,  # creates detailed pdf report (takes a bit longer for large datasets)
+    use_annotations=True,  # if True, uses annotations in results plots (if available), if False: ignores annotations
+    fmr_fnmr_error_range=(0.0, 1.0)  # range of error rates to plot in FMR-FNMR plots
+)

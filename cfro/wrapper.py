@@ -1,28 +1,31 @@
-from matplotlib import pyplot as plt
+import matplotlib
+from matplotlib.backends.backend_pdf import PdfPages
 from datetime import datetime
 import time
 import functools
-import matplotlib as mpl
 import pandas as pd
 import pyngrok
 import os
 import configparser
+import yaml
 
+from .analyzer.data_interface import AnalysisDataInterface
+from .analyzer.pdf_report import main as pdf_report
+from .analyzer.gt_estimation import main as gt_estimation
+from .analyzer.acc_and_bias_plots import main as accuracy_and_bias_plots
 from .database import Database
-from .scraper import ImageSource
 from .provider import ProviderType, provider_to_label, label_to_provider
-from .visualizer import *
 
 DEFAULT_DATABASE_PATH = "cfro_data"
 DEFAULT_NAMES_PATH = "names.csv"
-DEFAULT_PROVIDERS_PATH = "providers.csv"
+DEFAULT_PROVIDERS_PATH = "services.yaml"
+DEFAULT_SCRAPER_PATH = "../scrapers.yaml"
 
 RESULTS_DIR = "results"
 FACE_PANELS = "face_panels"
-EMBEDDINGS = "embeddings"
-PERF_PLOTS = "perf_plots"
-DB_STATS = "dataset_stats"
-EM_OUTPUT = "unsupervised"
+
+# To create the PDF
+matplotlib.use('Agg')
 
 
 def timer(func):
@@ -33,12 +36,16 @@ def timer(func):
 
     @functools.wraps(func)
     def wrapper_timer(*args, **kwargs):
-        print(f"Started {func.__name__!r}")
+        funcname = func.__name__
+        if not funcname in ["compare_faces", "label_detected_faces", "analyze"]:
+            print(f"Started {func.__name__!r} (✓ → success, . → failure)")
+        else:
+            print(f"Started {func.__name__!r}")
         start_time = time.perf_counter()  # 1
         value = func(*args, **kwargs)
         end_time = time.perf_counter()  # 2
         run_time = end_time - start_time  # 3
-        print(f"Finished {func.__name__!r} in {run_time:.4f} secs\n")
+        print(f"\nFinished {func.__name__!r} in {run_time:.4f} secs\n")
         return value
 
     return wrapper_timer
@@ -146,30 +153,34 @@ class CFRO:
     :param dataset_label:               optional label included in the output figures
     :param remove_duplicate_images:     enables a scan to remove duplicates from the scraped datasets
     :param scrape_from_past_n_days:     filters out articles older than n days to improve dataset recency
+    :param keep_duplicate_photo_dir:    if True, keeps the duplicate photo directory after removing duplicates
+    :param apply_majority_vote:         if True, applies majority vote for for ID estimation, otherwise uses per-provider
     """
 
     def __init__(
-        self,
-        names_path=DEFAULT_NAMES_PATH,
-        providers_path=DEFAULT_PROVIDERS_PATH,
-        database_path=DEFAULT_DATABASE_PATH,
-        constants_config_path=None,
-        label_faces=True,
-        restore=True,
-        add_timestamp=False,
-        max_number_of_photos=None,
-        ngrok=False,
-        ngrok_token=None,
-        port=5000,
-        subsampling_seed=None,
-        dataset_label=None,
-        remove_duplicate_images=True,
-        scrape_from_past_n_days=None,
+            self,
+            names_path=DEFAULT_NAMES_PATH,
+            scraper_path=DEFAULT_SCRAPER_PATH,
+            providers_path=DEFAULT_PROVIDERS_PATH,
+            database_path=DEFAULT_DATABASE_PATH,
+            image_source="google_news",
+            label_faces=True,
+            restore=True,
+            add_timestamp=False,
+            max_number_of_photos=None,
+            ngrok=False,
+            ngrok_token=None,
+            port=5000,
+            subsampling_seed=None,
+            dataset_label=None,
+            remove_duplicate_images=True,
+            scrape_from_past_n_days=None,
+            apply_majority_vote=True,
     ):
         self.names_path = names_path
+        self.scraper_path = scraper_path
         self.providers_path = providers_path
         self.database_path = database_path
-        self.constants_config_path = constants_config_path
         self.label_faces = label_faces
         self.restore = restore
         self.max_number_of_photos = max_number_of_photos
@@ -180,6 +191,11 @@ class CFRO:
         self.dataset_label = dataset_label
         self.remove_duplicate_images = remove_duplicate_images
         self.scrape_articles_from_past_n_days = scrape_from_past_n_days
+        self.apply_majority_vote = apply_majority_vote
+
+        assert image_source in ["google_news", "google_images"], "Invalid image source. " \
+                                                                 "Must be one of 'google_news' or 'google_images'"
+        self.image_source = image_source
 
         if self.ngrok_token:
             # We could move this somewhere so it doesn't run all the time.
@@ -194,13 +210,17 @@ class CFRO:
             self.person_names,
             self.person_paths,
             self.groups_with_name,
+            self.names_with_attributes,
         ) = self._parse_input_names_and_paths()
 
-        # Read in from credentials path to access tokens for each API we will test.
+        # Read in from scraper path to access Google Images API credentials.
+        self.scraper_credentials = self._parse_input_scraper_credentials()
+
+        # Read in from providers path to access tokens for each API we will test.
         self.providers_to_credentials = self._parse_input_providers()
         self.provider_enums = list(self.providers_to_credentials.keys())
 
-        self.face_cluster_config, self.EM_config = self._prepare_constants_config()
+        self.face_cluster_config = self._prepare_constants_config()
 
         if (not self.database.is_fresh_database) and restore:
             # Try to load an existing benchmark if one exists.
@@ -217,8 +237,8 @@ class CFRO:
         else:
             # Otherwise, create a new database from scratch.
             self.person_ids = []
-            for person_name in self.person_names:
-                person_id = self.database.add_person(person_name)
+            for person_name, person_attributes in self.names_with_attributes:
+                person_id = self.database.add_person(person_name, **person_attributes)
                 self.person_ids.append(person_id)
             for provider_enum, credentials in self.providers_to_credentials.items():
                 self.database.update_provider_credentials(provider_enum, credentials)
@@ -233,7 +253,7 @@ class CFRO:
 
             for group_type, names in groups_per_category.items():
                 assert (
-                    len(names) > 1
+                        len(names) > 1
                 ), "At least 2 names per race/gender category are required."
                 ids = set()
                 for person_name in names:
@@ -249,21 +269,12 @@ class CFRO:
         default_path = os.path.join(root, "default_config.ini")
         config.read(default_path)
 
-        if self.constants_config_path is not None:
-            # If any overrides are provided, read them (with higher priority).
-            config.read(self.constants_config_path)
-
-        # Process the config into a dictionary format.
-        EM_config_dict = {
-            k.upper(): eval(v)
-            for k, v in dict(config["UNSUPERVISED_EM_CONSTANTS"]).items()
-        }
         face_cluster_config_dict = {
             k.upper(): eval(v)
             for k, v in dict(config["FACE_GROUPING_CONSTANTS"]).items()
         }
 
-        return face_cluster_config_dict, EM_config_dict
+        return face_cluster_config_dict
 
     def _parse_input_names_and_paths(self):
         # Returns list of names and list of upload paths.
@@ -274,6 +285,7 @@ class CFRO:
             "gender": {},
             "race_gender": {},
         }
+        names_with_attributes = []
 
         csv = pd.read_csv(self.names_path)
         for i in range(len(csv)):
@@ -289,37 +301,39 @@ class CFRO:
             else:
                 paths.append(None)
 
-            if race not in groups["race"]:
-                groups["race"][race] = set()
-            groups["race"][race].add(name)
+            #            if race not in groups["race"]:
+            #                groups["race"][race] = set()
+            #            groups["race"][race].add(name)
 
-            if gender not in groups["gender"]:
-                groups["gender"][gender] = set()
-            groups["gender"][gender].add(name)
+            #            if gender not in groups["gender"]:
+            #                groups["gender"][gender] = set()
+            #            groups["gender"][gender].add(name)
 
             race_gender = f"{race} {gender}"
             if race_gender not in groups["race_gender"]:
                 groups["race_gender"][race_gender] = set()
             groups["race_gender"][race_gender].add(name)
 
-        return names, paths, groups
+            names_with_attributes.append((name, {"race": race, "gender": gender}))
+
+        return names, paths, groups, names_with_attributes
+
+    def _parse_input_scraper_credentials(self):
+        """
+        Returns map from enum to its credentials.
+        """
+        return yaml.safe_load(open(self.scraper_path, "r"))
 
     def _parse_input_providers(self):
         """
         Returns map from enum to its credentials.
         """
+        providers = yaml.safe_load(open(self.providers_path, "r"))
         provider_to_credentials = {}
-        csv = pd.read_csv(self.providers_path)
-        for i in range(len(csv)):
-            row = csv.iloc[i]
-            provider_id = row["provider"]
-            if type(provider_id) is not str:
-                provider_enum = ProviderType(provider_id)
-            else:
-                provider_enum = label_to_provider(provider_id)
-            provider_to_credentials[provider_enum] = {
-                "endpoint": row["username"],
-                "key": row["password"],
+        for key, vals in providers.items():
+            provider_to_credentials[eval(f"ProviderType.{key}")] = {
+                "endpoint": vals["credentials"]["username"],
+                "key": vals["credentials"]["password"],
             }
         return provider_to_credentials
 
@@ -335,9 +349,9 @@ class CFRO:
         """
         self.load_photos()
         self.detect_faces()
+        self.compare_faces()
         if self.label_faces:
             self.label_detected_faces()
-        self.compare_faces()
         self.analyze()
 
     @timer
@@ -345,7 +359,7 @@ class CFRO:
         """
         This stage scrapes a dataset of images for each identity from ``names_path``.
 
-        To accomplish this, we use Google News API to look up recent news articles for each identity,
+        To accomplish this, we use Google Images or Google News API to look up recent news articles for each identity,
         then download photos from these news articles.
 
         The source urls for the dataset are loaded into the database's ``photo.csv`` file.
@@ -354,16 +368,20 @@ class CFRO:
         """
         if self.restored:
             raise NotImplementedError("Can't download new images yet.")
+
+        print(f"Using image source: {self.image_source}")
+
         self.version_ids = []
         for i, person_id in enumerate(self.person_ids):
             upload_path = self.person_paths[i]
             if upload_path is None:
                 version_id = self.database.add_version(
                     person_id,
-                    download_source=ImageSource.GOOGLE_NEWS,
+                    download_source=self.image_source,
                     max_number_of_photos=self.max_number_of_photos,
                     remove_duplicate_images=self.remove_duplicate_images,
                     scrape_articles_from_past_n_days=self.scrape_articles_from_past_n_days,
+                    scraper_credentials=self.scraper_credentials,
                 )
             else:
                 version_id = self.database.add_version(
@@ -373,6 +391,14 @@ class CFRO:
                     remove_duplicate_images=self.remove_duplicate_images,
                 )
             self.version_ids.append(version_id)
+
+        # Minimum number N of photos downloaded per person
+        N = 10
+
+        for i, (person_id, version_id) in enumerate(zip(self.person_ids, self.version_ids)):
+            version = self.database.get_person(person_id).get_version(version_id)
+            if version.get_num_photos() < N:
+                del self.person_ids[i], self.version_ids[i]
 
         self.dataset_id = self.database.add_dataset(self.person_ids, self.version_ids)
         self.benchmark_id = self.database.add_benchmark(
@@ -385,13 +411,14 @@ class CFRO:
     def detect_faces(self):
         """
         This stage runs cloud Face Detect APIs (each provider from ``providers_path``) over each image scraped.
-        Detections are persisted periodically using the database's ``face.csv`` file (to protect against crashes).
+        Detections are persisted periodically using the database's ``detections.csv`` file (to protect against crashes).
 
         Once this is complete, we overlay face detections from all providers (for each image).
         We keep photos with only one face and exactly one face detection per provider.
         All other photos are discarded.
         """
         self.benchmark.run_providers_detect()
+        self.benchmark.deduplicate()
 
     @set_constants_config
     @timer
@@ -420,533 +447,31 @@ class CFRO:
         We run an equal number of between-seed-id comparisons (faces collected for different identities), using random sampling.
         """
         self.benchmark.run_providers_compare(
-            subsampling_seed=self.subsampling_seed,
+            groups=self.union_of_groups_with_id, subsampling_seed=self.subsampling_seed,
         )
-
-    def _get_output_name(self, provider_enum, plot_name, subdir="", ext=".pdf"):
-        return f'{self.database_path}{os.sep}{RESULTS_DIR}{os.sep}{subdir}{os.sep if subdir else ""}{plot_name}_{provider_enum.value}{ext}'
 
     @set_constants_config
     @timer
-    def analyze(self):
-        """
-        This stage processes the Compare output to generate the following graphics:
+    def analyze(self, create_pdf_report=True, use_annotations=True, fmr_fnmr_error_range=(0.0, 1.0)):
 
-        Unsupervised:
-
-        1. Match/non-match EM estimate distributions vs real distributions
-        2. FMR/FNMR EM estimate vs real FMR/FNMR
-        3. FMR/FNMR EM estimate vs real FMR/FNMR with (FMR, FNMR) scatter points at various thresholds
-        4. FMR/FNMR EM bootstrapped estimate vs real FMR/FNMR
-
-        Supervised:
-
-        1. Performance curves (e.g., FNMR-FMR, Precision-Recall, etc.) - saved to the ``results/perf_plots/`` folder.
-        2. MDS of faces scraped per identity (using confidences from the providers) - saved to the ``results/embeddings/`` folder.
-        3. Extreme faces per identity (faces sorted by average confidence for match or non-match comparisons) - saved to the ``results/face_panels/`` folder.
-        4. Database statistics - saved to the ``results/dataset_stats/`` folder.
-        """
-        # TODO - further organize the output and/or improve the visualizations.
-        root = f"{self.database_path}{os.sep}{RESULTS_DIR}"
-        for path in [
-            root,
-            f"{root}{os.sep}{DB_STATS}",
-            f"{root}{os.sep}{FACE_PANELS}",
-            f"{root}{os.sep}{EMBEDDINGS}",
-            f"{root}{os.sep}{PERF_PLOTS}",
-            f"{root}{os.sep}{EM_OUTPUT}",
-        ]:
-            if not os.path.exists(path):
-                os.mkdir(path)
-
-        # We record which identities were scraped vs uploaded, so we can adjust the
-        # EM same-id comparison priors accordingly.
-        person_id_to_was_uploaded = {
-            self.database._get_person_id(name): (path is not None)
-            for name, path in zip(self.person_names, self.person_paths)
-        }
-
-        results, dataset_stats = self.benchmark.run_providers_evaluate(
-            self.EM_config,
-            subsampling_seed=self.subsampling_seed,
-            groups=self.union_of_groups_with_id,
-            person_id_to_was_uploaded=person_id_to_was_uploaded,
-        )
-
-        # Here, we will use the unsupervised results and supervised results.
-        for provider_enum, provider_results in results.items():
-            provider_label = provider_to_label(provider_enum)
-
-            supervised_results = provider_results["supervised"]
-            unsupervised_results = provider_results["unsupervised"]
-
-            # TODO - include multi-group comparison plots like we do for the supervised results
-            # on line 622 as of this commit. For example, we would like to have plots that
-            # compare races, compare genders, compare race x gender categories for bias.
-
-            for group_name, group_unsupervised_results in unsupervised_results.items():
-                unsup_root = f"{root}{os.sep}{EM_OUTPUT}"
-                # TODO - once we have multiple providers running, we need to include
-                # the provider information in the filename. Otherwise, each provider
-                # will overwrite the same filename here.
-                subdir = f'{unsup_root}{os.sep}{str(group_name).replace(" ", "_")}'
-                if not os.path.exists(subdir):
-                    os.mkdir(subdir)
-
-                if supervised_results is None:
-                    group_supervised_results = None
-                    true_match_confidences = None
-                    true_nonmatch_confidences = None
-                else:
-                    group_supervised_results = supervised_results["metrics"][group_name]
-                    true_match_confidences = group_supervised_results[
-                        "true_match_confidences"
-                    ]
-                    true_nonmatch_confidences = group_supervised_results[
-                        "no_match_confidences"
-                    ]
-
-                # Loop over the EM algo input param specs here.
-                for estimate_nonmatch_distribution_each_iteration in [True, False]:
-
-                    # This is the true unsupervised output.
-                    kernel_output = group_unsupervised_results["point"][
-                        estimate_nonmatch_distribution_each_iteration
-                    ]
-                    bootstrapped_output = group_unsupervised_results["bootstrapped"][
-                        estimate_nonmatch_distribution_each_iteration
-                    ]
-
-                    generate_unsupervised_plots(
-                        true_match_confidences,
-                        true_nonmatch_confidences,
-                        kernel_output,
-                        bootstrapped_output,
-                        subdir,
-                        estimate_nonmatch_distribution_each_iteration=estimate_nonmatch_distribution_each_iteration,
-                    )
-
-        # From this point onward, all results are supervised.
-        results = {
-            provider_enum: provider_results["supervised"]
-            for provider_enum, provider_results in results.items()
-        }
-
-        # This generates the database statistics folder files *without* race/gender groups reflected.
-        show_dataset_statistics(
-            dataset_stats,
-            self.database.people,
-            f"{self.database_path}{os.sep}{RESULTS_DIR}{os.sep}{DB_STATS}{os.sep}",
-        )
-        # This generates the database statistics folder files *with* categories for race/gender groups.
-        show_dataset_statistics(
-            dataset_stats,
-            self.database.people,
-            f"{self.database_path}{os.sep}{RESULTS_DIR}{os.sep}{DB_STATS}{os.sep}",
-            groups=self.union_of_groups_with_id,
-            disjoint_groups=list(self.groups_with_id["race_gender"].keys()),
-        )
-
-        provider_faces = self.benchmark.get_detected_faces()
-
-        # The following plots are all saved to the PERF subdirectory.
-        # TODO - we could generate a folder per person or per provider to organize the output.
-
-        # Plot supervised FMR vs FNMR (and related curves) for all providers on one graphs!!!
-        axes, figs = prepare_empty_plots_v2(4)
-        for provider_enum, provider_results in results.items():
-            try:
-                provider_aggregate = provider_results["metrics"]["aggregate"]
-            except:
-                # If there aren't any supervised results, we can exit here.
-                exit(0)
-            provider_label = provider_to_label(provider_enum)
-            plot_data_v2(
-                provider_aggregate,
-                None,
-                axes=axes,
-                tag=provider_label,
-                dataset_label=self.dataset_label,
-                provider_name=None,
-            )
-        plot_data_v2_consolidate(
-            axes,
-            figs,
-            f"{self.database_path}{os.sep}{RESULTS_DIR}{os.sep}{PERF_PLOTS}{os.sep}all_providers_aggregate_plot_v2",
-        )
-
-        # If there are multiple providers being tested, display
-        # all of the aggregate FMR-FNMR curves in a single figure.
-        # This is the same as above but just uses another plotting library.
-        if len(results) > 1:
-            plot_many_fmr_fnmr(
-                results,
-                f"{self.database_path}{os.sep}{RESULTS_DIR}{os.sep}{PERF_PLOTS}{os.sep}fmr_fnmr_combined.pdf",
-            )
-
-        # Plot supervised FMR vs FNMR (and related curves) for all providers, per race and/or gender group.
-        if self.union_of_groups_with_id is not None:
-            for group in self.union_of_groups_with_id:
-                # Plot these (e.g., FMR vs FNMR) for all providers on one graphs!!!
-                axes, figs = prepare_empty_plots_v2(4)
-                for provider_enum, provider_results in results.items():
-                    provider_aggregate = provider_results["metrics"][group]
-                    provider_label = provider_to_label(provider_enum)
-                    plot_data_v2(
-                        provider_aggregate,
-                        None,
-                        axes=axes,
-                        tag=provider_label,
-                        dataset_label=self.dataset_label,
-                        provider_name=None,
-                    )
-                plot_data_v2_consolidate(
-                    axes,
-                    figs,
-                    f"{self.database_path}{os.sep}{RESULTS_DIR}{os.sep}{PERF_PLOTS}{os.sep}all_providers_{group}_plot_v2",
-                )
-
-        # These are individual-provider plots, i.e., only one provider per figure.
-        for provider_enum, provider_results in results.items():
-            provider_label = provider_to_label(provider_enum)
-
-            # Note: race/gender groups are also processed here and lumped in with "people".
-            # This could be cleaned up, but for now, wherever a comment says "each person" it
-            # means "each person's individual results and each race/gender group's aggregate results".
-            for key, metrics in provider_results["metrics"].items():
-                # Plot the true match and true non-match confidences collected for each person
-                # on a separate graph.
-                plot_match_nonmatch_confidences(
-                    provider_enum,
-                    metrics,
-                    self._get_output_name(
-                        provider_enum,
-                        f"person{key}_match_nonmatch_confidences",
-                        subdir=PERF_PLOTS,
-                    ),
-                )
-
-                # Plot a histogram of all confidences collected for each person on a separate graph.
-                plot_all_confidences(
-                    provider_enum,
-                    metrics,
-                    self._get_output_name(
-                        provider_enum, f"person{key}_all_confidences", subdir=PERF_PLOTS
-                    ),
-                )
-
-                # Plot supervised FMR vs FNMR (and related curves) for each person on a separate graph.
-                # This is the same as below except using a separate plotting library.
-                plot_fmr_fnmr(
-                    provider_enum,
-                    metrics,
-                    self._get_output_name(
-                        provider_enum, f"person{key}_fmr_fnmr", subdir=PERF_PLOTS
-                    ),
-                )
-
-                # Plot supervised FMR vs FNMR (and related curves) for each person on a separate graph.
-                plot_data_v2(
-                    metrics,
-                    f"{self.database_path}{os.sep}{RESULTS_DIR}{os.sep}{PERF_PLOTS}{os.sep}person{key}_plot_v2_"
-                    + str(provider_enum.value),
-                    dataset_label=self.dataset_label,
-                    provider_name=provider_label,
-                )
-
-            # Plot supervised FMR vs FNMR (and related curves) for every person on the same graph.
-            # This also includes the aggregate curves.
-            axes, figs = prepare_empty_plots_v2(4)
-            num_items_in_legend = len(
-                [
-                    key
-                    for key in provider_results["metrics"]
-                    if key == "aggregate" or type(key) is not str
-                ]
-            )
-            # If there are many people, we need to include more unique legend colors and resize the legend.
-            huge_legend = num_items_in_legend > 15
-            if huge_legend:
-                prop_cycle_old = mpl.rcParams["axes.prop_cycle"]
-                mpl.rcParams["axes.prop_cycle"] = mpl.cycler(
-                    color=list(plt.cm.tab20.colors) + list(plt.cm.tab20.colors)
-                ) + mpl.cycler(markersize=[6] * 20 + [3] * 20)
-            for key, metrics in provider_results["metrics"].items():
-                # TODO - should the aggregate be included? (seems fine)
-                if key == "aggregate":
-                    person_name = "Aggregate"
-                elif type(key) is str:
-                    # Do not include groups in this plot.
-                    # They are the only other key with str type,
-                    # as individual people have int keys (person ids).
-                    continue
-                else:
-                    person_name = self.database.people[key].name
-
-                plot_data_v2(
-                    metrics,
-                    None,
-                    axes=axes,
-                    tag=person_name,
-                    dataset_label=self.dataset_label,
-                    provider_name=provider_label,
-                )
-            plot_data_v2_consolidate(
-                axes,
-                figs,
-                f"{self.database_path}{os.sep}{RESULTS_DIR}{os.sep}{PERF_PLOTS}{os.sep}all_people_plot_v2_"
-                + str(provider_enum.value),
-                huge_legend=huge_legend,
-            )
-            # Restore the legend to its old properties.
-            if huge_legend:
-                mpl.rcParams["axes.prop_cycle"] = prop_cycle_old
-
-            # Plot supervised FMR vs FNMR (and related curves) for each category of the race, gender,
-            # and race-gender attributes. For example, one plot will have Male vs Female on the same figure.
-            for label, groups in self.groups_with_id.items():
-                # Plot supervised FMR vs FNMR (and related curves) for every sub-group on the same graph.
-                axes, figs = prepare_empty_plots_v2(4)
-                for group in groups:
-                    metrics = provider_results["metrics"][group]
-                    plot_data_v2(
-                        metrics,
-                        None,
-                        axes=axes,
-                        tag=group,
-                        dataset_label=self.dataset_label,
-                        provider_name=provider_label,
-                    )
-                plot_data_v2_consolidate(
-                    axes,
-                    figs,
-                    f"{self.database_path}{os.sep}{RESULTS_DIR}{os.sep}{PERF_PLOTS}{os.sep}groups_{label}_plot_v2_"
-                    + str(provider_enum.value),
-                )
-
-            # Plot supervised FMR vs FNMR (and related curves) for all people in a given race/gender category.
-            for label, groups in self.union_of_groups_with_id.items():
-                # Plot supervised FMR vs FNMR (and related curves) for every sub-group on the same graph.
-                axes, figs = prepare_empty_plots_v2(4)
-                for group in groups:
-                    metrics = provider_results["metrics"][group]
-                    plot_data_v2(
-                        metrics,
-                        None,
-                        axes=axes,
-                        tag=group,
-                        dataset_label=self.dataset_label,
-                        provider_name=provider_label,
-                    )
-                plot_data_v2_consolidate(
-                    axes,
-                    figs,
-                    f"{self.database_path}{os.sep}{RESULTS_DIR}{os.sep}{PERF_PLOTS}{os.sep}groups_{label}_plot_v2_"
-                    + str(provider_enum.value),
-                )
-
-            # TODO - extend the face panel HTML to handle multiple providers more effectively
-            names_ids = list(
-                zip(
-                    self.benchmark.dataset.people_names,
-                    [
-                        person_id
-                        for person_id, _ in self.benchmark.dataset.get_person_and_version_ids()
-                    ],
-                )
-            )
-            create_extreme_faces_landing_page(
-                provider_enum,
-                names_ids,
-                self._get_output_name(
-                    provider_enum, f"index", ext=".html", subdir=FACE_PANELS
-                ),
-            )
-
-            faces = self.database._load_faces()
-            photo_id_to_url = self.database.photo_id_to_url
-
-            for person, extrema in provider_results["extrema"].items():
-                if person == "aggregate":
-                    continue
-
-                # This produces an HTML panel that shows the faces with the
-                # highest/lowest average confidence values over all comparisons.
-                for extrema_type in ["confusing", "representative"]:
-                    for summary_stat in ["avg", "median"]:
-                        show_extreme_faces(
-                            self.database,
-                            faces,
-                            self.database.people,
-                            photo_id_to_url,
-                            provider_enum,
-                            extrema["same_id"],
-                            True,  # same-id
-                            self._get_output_name(
-                                provider_enum,
-                                f"{extrema_type}_{summary_stat}_same_id_{person}",
-                                ext=".html",
-                                subdir=FACE_PANELS,
-                            ),
-                            summary_stat,
-                            extrema_type,
-                            False,  # multiple_ids
-                        )
-
-                        show_extreme_faces(
-                            self.database,
-                            faces,
-                            self.database.people,
-                            photo_id_to_url,
-                            provider_enum,
-                            extrema["diff_id"],
-                            False,  # diff-id
-                            self._get_output_name(
-                                provider_enum,
-                                f"{extrema_type}_{summary_stat}_diff_id_{person}",
-                                ext=".html",
-                                subdir=FACE_PANELS,
-                            ),
-                            summary_stat,
-                            extrema_type,
-                            False,  # multiple_ids
-                        )
-
-                    show_extreme_face_pairs(
-                        self.database,
-                        faces,
-                        self.database.people,
-                        photo_id_to_url,
-                        provider_enum,
-                        extrema["same_id"],
-                        True,  # same-id
-                        self._get_output_name(
-                            provider_enum,
-                            f"{extrema_type}_pairs_same_id_{person}",
-                            ext=".html",
-                            subdir=FACE_PANELS,
-                        ),
-                        extrema_type,
-                        False,  # multiple_ids
-                    )
-
-                    show_extreme_face_pairs(
-                        self.database,
-                        faces,
-                        self.database.people,
-                        photo_id_to_url,
-                        provider_enum,
-                        extrema["diff_id"],
-                        False,  # same-id
-                        self._get_output_name(
-                            provider_enum,
-                            f"{extrema_type}_pairs_diff_id_{person}",
-                            ext=".html",
-                            subdir=FACE_PANELS,
-                        ),
-                        extrema_type,
-                        True,  # multiple_ids
-                    )
-
-            # This produces a 2d embedding for each face annotated as a correct match
-            # for its seed person, with 2d distances ~ face API similarity output scores.
-            for person, matrix in provider_results["matrix"].items():
-                if person == "all":
-                    continue
-                show_faces_2d_embedding(
-                    self.database,
-                    matrix,
-                    provider_results["face_to_person"],
-                    provider_faces[provider_enum],
-                    out=self._get_output_name(
-                        provider_enum,
-                        f"face_embedding_REPLACE_p{person}",
-                        subdir=EMBEDDINGS,
-                    ),
-                )
-
-            # We skipped the aggregate data before, so here we perform the extreme face analysis
-            # over all people/faces.
-            for extrema_type in ["confusing", "representative"]:
-                label = (
-                    extrema_type if extrema_type == "confusing" else "distinguishable"
-                )
-                for summary_stat in ["avg", "median"]:
-                    show_extreme_faces(
-                        self.database,
-                        faces,
-                        self.database.people,
-                        photo_id_to_url,
-                        provider_enum,
-                        provider_results["extrema"]["aggregate"]["diff_id"],
-                        False,  # same-id
-                        self._get_output_name(
-                            provider_enum,
-                            f"{label}_{summary_stat}_diff_id",
-                            ext=".html",
-                            subdir=FACE_PANELS,
-                        ),
-                        summary_stat,
-                        extrema_type,
-                        True,  # multiple_ids
-                    )
-
-                    show_extreme_faces(
-                        self.database,
-                        faces,
-                        self.database.people,
-                        photo_id_to_url,
-                        provider_enum,
-                        provider_results["extrema"]["aggregate"]["same_id"],
-                        True,  # same-id
-                        self._get_output_name(
-                            provider_enum,
-                            f"{extrema_type}_{summary_stat}_same_id",
-                            ext=".html",
-                            subdir=FACE_PANELS,
-                        ),
-                        summary_stat,
-                        extrema_type,
-                        True,  # multiple_ids
-                    )
-
-                show_extreme_face_pairs(
-                    self.database,
-                    faces,
-                    self.database.people,
-                    photo_id_to_url,
-                    provider_enum,
-                    provider_results["extrema"]["aggregate"]["diff_id"],
-                    False,  # diff-id
-                    self._get_output_name(
-                        provider_enum,
-                        f"{label}_pairs_diff_id",
-                        ext=".html",
-                        subdir=FACE_PANELS,
-                    ),
-                    extrema_type,
-                    True,  # multiple_ids
-                )
-
-                show_extreme_face_pairs(
-                    self.database,
-                    faces,
-                    self.database.people,
-                    photo_id_to_url,
-                    provider_enum,
-                    provider_results["extrema"]["aggregate"]["same_id"],
-                    True,  # same-id
-                    self._get_output_name(
-                        provider_enum,
-                        f"{extrema_type}_pairs_same_id",
-                        ext=".html",
-                        subdir=FACE_PANELS,
-                    ),
-                    extrema_type,
-                    True,  # multiple_ids
-                )
-
-        return results
+        service_info = yaml.safe_load(open(self.providers_path, "r"))
+        data_interface = AnalysisDataInterface(self.database_path, service_info)
+        if create_pdf_report:
+            pdf_report(data_interface, service_info, out_dir=self.database_path)
+        estimation_results = gt_estimation(data_interface,
+                                           service_info,
+                                           out_dir=self.database_path,
+                                           return_annotations=use_annotations,
+                                           majority_vote_gt=self.apply_majority_vote
+                                           )
+        accuracy_and_bias_plots(estimation_results,
+                                data_interface,
+                                service_info,
+                                out_dir=self.database_path,
+                                error_range=fmr_fnmr_error_range
+                                )
+        print(f"Done. Plots can be found in: {os.path.join(self.database_path, 'plots')}")
+        return
 
     @set_constants_config
     def resolve_faces(self):
@@ -954,4 +479,6 @@ class CFRO:
         This runs a demo that shows the bounding box groups for
         each input photo.
         """
-        self.benchmark._resolve_detected_faces(run_test_demo=True)
+        pdf = PdfPages(f"{self.database_path}{os.sep}bboxes.pdf")
+        self.benchmark._resolve_detected_faces(run_test_demo=True, pdf=pdf)
+        pdf.close()

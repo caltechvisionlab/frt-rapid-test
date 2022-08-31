@@ -11,7 +11,9 @@ html,body,h1,h2,h3,h4,h5,h6 {font-family: "Roboto", sans-serif}
 <body>
     <h2>Here are all the people you can annotate:</h2>
     {% for name, count in names_and_face_counts %}
+        {% if count!=0 %}
         <li><h3><a href="/orig/{{name}}">{{name}}</a> ({{count}} unlabeled images)</h3></li>
+        {% endif %}
     {% endfor %}
 
     <h3><a href="/exit">Click here</a> to exit the tool.</h3>

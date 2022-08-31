@@ -36,8 +36,9 @@ class Labeler:
         self.face_to_labels = {}
         self.photo_id_to_url = {}
         for photo_id, url in photo_id_to_url.items():
-            if Photo._needs_to_be_hosted(url):
-                url = "/uploads/" + f"{photo_id:06}"
+            ## Photo always needs to be hosted
+            # if Photo._needs_to_be_hosted(url):
+            url = "/uploads/" + f"{photo_id:06}"
             self.photo_id_to_url[photo_id] = url
 
         self.max_per_page = max_per_page

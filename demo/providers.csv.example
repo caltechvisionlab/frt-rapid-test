@@ -1,4 +1,0 @@
-provider,username,password
-Azure,<endpoint>,<key>
-AWS,<access key ID>,<access key secret>
-Face++,<key>,<secret>
