@@ -1,0 +1,81 @@
+person_id,name,race,gender
+0,Ana de Armas,WJ,F
+1,Millie Bobby Brown,WJ,F
+2,Zoey Deutch,WJ,F
+3,Joey King,WJ,F
+4,Natalia Dyer,WJ,F
+5,Bailee Madison,WJ,F
+6,Sofia Carson,WJ,F
+7,Sydney Sweeney,WJ,F
+8,Florence Pugh,WJ,F
+9,Daisy Edgar-Jones,WJ,F
+10,Diane Keaton,WS,F
+11,Vanessa Redgrave,WS,F
+12,Joely Richardson,WS,F
+13,Lisa Ann Walter,WS,F
+14,Marcia Gay Harden,WS,F
+15,Jennifer Coolidge,WS,F
+16,Pat Carroll,WS,F
+17,Christine Lagarde,WS,F
+18,Hillary Clinton,WS,F
+19,Emma Thompson,WS,F
+20,Robert De Niro,WS,M
+21,Harrison Ford,WS,M
+22,Sylvester Stallone,WS,M
+23,Tommy Lee Jones,WS,M
+24,Donald Sutherland,WS,M
+25,Clint Eastwood,WS,M
+26,Robert Duvall,WS,M
+27,Ed Harris,WS,M
+28,Bruce Willis,WS,M
+29,Mel Gibson,WS,M
+30,Austin Butler,WJ,M
+31,Thomas Brodie-Sangster,WJ,M
+32,Will Poulter,WJ,M
+33,Nat Wolff,WJ,M
+34,Timothee Chalamet,WJ,M
+35,Chris Evans,WJ,M
+36,Tom Holland,WJ,M
+37,Aaron Taylor-Johnson,WJ,M
+38,Dylan O'Brien,WJ,M
+39,Miles Teller,WJ,M
+40,Aliya,A,F
+41,Angelababy,A,F
+42,Chen Duling,A,F
+43,Chen Hao,A,F
+44,Dilraba Dilmurat,A,F
+45,Fan Bingbing,A,F
+46,Gao Yuanyuan,A,F
+47,Gong Li,A,F
+48,Jiang Qinqin,A,F
+49,Yu Nan,A,F
+50,Bai Jingting,A,M
+51,William Chan,A,M
+52,Jackie Chan,A,M
+53,Edison Chen,A,M
+54,Ekin Cheng,A,M
+55,David Chiang,A,M
+56,Chin Han,A,M
+57,Jay Chou,A,M
+58,Stephen Chow,A,M
+59,Chow Yun-fat,A,M
+60,Barack Obama,B,M
+61,Samuel L. Jackson,B,M
+62,Robert L. Johnson,B,M
+63,Idris Elba,B,M
+64,Kanye West,B,M
+65,Samuel Eto'o,B,M
+66,LeBron James,B,M
+67,Kevin Durant,B,M
+68,James Harden,B,M
+69,Carmelo Anthony,B,M
+70,Rihanna,B,F
+71,Beyonce,B,F
+72,Kamala Harris,B,F
+73,Danai Gurira,B,F
+74,Taraji Henson,B,F
+75,Octavia Spencer,B,F
+76,Janelle Monae,B,F
+77,Gabrielle Union,B,F
+78,Lupita Nyong'o,B,F
+79,Viola Davis,B,F
