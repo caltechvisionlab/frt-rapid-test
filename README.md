@@ -2,34 +2,20 @@
 
 Preprint available on [arXiv](TODO).
 
-This module benchmarks face recognition APIs (e.g., AWS Rekognition or Azure Face) for overall performance and racial/gender bias. The benchmark scrapes a face dataset from internet sources and uses an unsupervised algorithm to score APIs on this dataset, so no manual labels are required.
+This module benchmarks face recognition APIs (e.g., AWS Rekognition, Azure Face, or Face++) for overall performance and racial/gender bias. The benchmark scrapes a face dataset from internet sources and uses an unsupervised algorithm to score APIs on this dataset, so no manual labels are required.
 
 This package was developed by Ethan Mann (emann@alumni.caltech.edu), Ignacio Serna (ignacio.serna@uam.es), Manuel Knott (mknott@ethz.ch), and Professor Pietro Perona ([vision.caltech.edu](http://www.vision.caltech.edu/)).
 
-## Section 1a: Setup accounts with cloud providers
+---
 
-The package currently supports two cloud providers. Here are instructions to setup each provider. For demo purposes, it is easiest to start with Face++. The free tier of each provider is sufficient for small datasets.
+## Setup APIs
 
-### Amazon AWS
-- Follow the steps [here](https://aws.amazon.com/premiumsupport/knowledge-center/create-and-activate-aws-account/) to create an account, then read the "Programmatic access" section of [this guide](https://docs.aws.amazon.com/general/latest/gr/aws-sec-cred-types.html) to get an access key ID and secret access key.
-
-### Face++
-- Create an account [here](https://console.faceplusplus.com/register) and follow [these steps](https://console.faceplusplus.com/documents/7079083) to obtain an API key and API secret.
-
-## Section 1b: Choose your Images API
-
-### Google News
-
-If you choose to use Google News for image scraping, no additional steps are needed.
-
-### Google Images
-
-Follow the instructions [here](https://developers.google.com/custom-search/v1/overview) to create a Google Custom Search Engine (CSE) and obtain an API key. The CSE should be configured to search the entire web, not just a subset of sites.
-Be aware that, Custom Search JSON API provides 100 search queries per day for free. If you need more, you may sign up for billing in the API Console. Additional requests cost $5 per 1000 queries, up to 10k queries per day.
+See [docs/api-setups.md](docs/api_setups.md) for more information on setting up accounts with different cloud providers.
+Once you have obtained API credentials, add them to the [scrapers.yaml](scrapers.yaml) and [services.yaml](services.yaml) files .
 
 ---
 
-## Section 2: Running the package
+## Installing the package
 
 ### Python version requirement
 
@@ -66,42 +52,41 @@ source venv/bin/activate
 pip3 install "git+https://TOKEN@github.com/caltechvisionlab/frt-rapid-test.git"
 ```
 
-### Quickstart commands
-
-Here are steps to run the demo experiment (skip steps 3-5 if you already pip-installed the package):
+**Option 3.** Clone the repository
 ```
-# 1. clone the repo
+# clone the repo
 git clone git@github.com:caltechvisionlab/frt-rapid-test.git
 
-# 2. cd into the repo
+# cd into the repo
 cd frt-rapid-test
 
-# 3. create the virtual environment
+# create the virtual environment
 virtualenv venv -p 3.9  # or 3.10
 
-# 4. enter the virtual environment
+# enter the virtual environment
 source venv/bin/activate
 
-# 5. install dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# 6. Add API credentials to scrapers.yaml and serices.yaml
-
-# 7. (optionally) edit demo/names.csv to scrape images of different people
-
-# 8. (optionally) edit demo__main__.py to only run specific steps of the benchmark
-
-# 9. run demo experiment
-python3 -m demo
-
-# 10. exit the virtual environment
-deactivate
+# install dependencies
+pip install --upgrade pip && pip install -r requirements.txt
 ```
 
 ---
 
-## Section 3: Directory contents
+## Quickstart (Running the demo)
+
+To run a quick demostration of the package, make sure to clone the repository (Option 3 above) and have your API credentials setup (see section above).
+If you like, you can edit the list of names in `demo/names.csv` to scrape images of different people.
+
+Then, run the demo script by calling the following command from the root directory of the repository:
+```
+python3 -m demo
+```
+
+We recommend to have a look at [demo/\_\_main\_\_.py](demo/__main__.py) for a demonstration how to use the package as a python module.
+
+---
+
+## Directory contents
 
 ### cfro/
 
@@ -111,6 +96,31 @@ The `cfro` package is the end-to-end pipeline for the facial recognition benchma
 
 This is a demo script to teach how to use the package. Run `python3 -m demo`.
 
+### docs/
+
+Contains additional documentation.
+
 ### paper-supplement/
 
 Contains supplementary files for the published paper.
+
+---
+
+## License
+
+TBD
+
+---
+
+## Citation
+
+If you find this package useful, please consider citing our paper:
+
+```
+@article{knott2024rapid,
+  title={A Rapid Test for Accuracy and Bias of Face Recognition Technology},
+  author={Knott, Manuel and Serna, Ignacio and Mann, Ethan and Perona, Pietro},
+  journal={arXiv preprint arXiv:2401.XXXXX},
+  year={2024}
+}
+```
