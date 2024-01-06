@@ -20,21 +20,21 @@ else:
 
 # Load a benchmark pipeline with any parameters of interest.
 benchmark = CFRO(
-    label_faces=True,
-    names_path="names.csv",
-    providers_path="../services.yaml",
-    scraper_path="../scrapers.yaml",
-    database_path="demo_data",
+    label_faces=True,  # if True, labelling UI will be loaded
+    names_path="names.csv",  # csv file with names of people in the dataset
+    providers_path="../services.yaml",  # FRT providers credentials
+    scraper_path="../scrapers.yaml",  # image scrapers credentials
+    database_path="demo_data",  # folder name where outputs will be stored
     image_source="google_images",  # Options: "google_images", "google_news"
-    max_number_of_photos=100,
-    subsampling_seed=2022,
-    apply_majority_vote=True
+    max_number_of_photos=100,  # maximum number of photos to download per person
+    subsampling_seed=2022,  # seed for subsampling cross-query pairs
+    apply_majority_vote=True  # if True, majority vote will be applied to estimate labels
 )
 
 # # Run the entire benchmark.
 # benchmark.run()
 
-# Run the benchmark step by step.
+# Alternatively, run the benchmark step by step.
 
 benchmark.load_photos()
 
@@ -49,3 +49,5 @@ benchmark.analyze(
     use_annotations=True,  # if True, uses annotations in results plots (if available), if False: ignores annotations
     fmr_fnmr_error_range=(0.0, 1.0)  # range of error rates to plot in FMR-FNMR plots
 )
+
+# All intermediate and final results are stored in the database_path folder.

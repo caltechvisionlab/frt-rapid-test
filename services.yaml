@@ -1,3 +1,11 @@
+# IMPORTANT Outcomment or delete unused services. The package will try to use all services that are defined here.
+
+MICROSOFT_AZURE:
+  id: 3
+  credentials:
+    username: <your username>
+    password: <your password>
+  name: Azure Face Service
 AMAZONAWS:
   id: 4
   credentials:
