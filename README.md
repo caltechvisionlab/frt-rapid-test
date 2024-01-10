@@ -108,7 +108,7 @@ Contains supplementary files for the published paper.
 
 ## License
 
-TBD
+This project is licensed under the terms of the [MIT license](LICENSE).
 
 ---
 
