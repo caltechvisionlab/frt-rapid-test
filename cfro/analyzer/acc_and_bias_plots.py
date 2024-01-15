@@ -64,13 +64,14 @@ def fmr_fnmr(
         df["Y_est1"] = Y_est.astype("Int16")
         df.reset_index(inplace=True)
 
+        df.set_index("person0_id", inplace=True)
+        df["person0_demo"] = person_meta["demo"]
+        df.reset_index(inplace=True)
+        df.set_index("person1_id", inplace=True)
+        df["person1_demo"] = person_meta["demo"]
+        df.reset_index(inplace=True)
+
         if demographics_filter:
-            df.set_index("person0_id", inplace=True)
-            df["person0_demo"] = person_meta["demo"]
-            df.reset_index(inplace=True)
-            df.set_index("person1_id", inplace=True)
-            df["person1_demo"] = person_meta["demo"]
-            df.reset_index(inplace=True)
             df = df[(df["person0_demo"] == demographics_filter) & (df["person1_demo"] == demographics_filter)]
 
         if force_same_image_set:
@@ -82,10 +83,12 @@ def fmr_fnmr(
 
         has_same_query_id = df["person0_id"] == df["person1_id"]
         has_different_query_id = df["person0_id"] != df["person1_id"]
+        has_same_demo = df["person0_demo"] == df["person1_demo"]
+
         provider_filter = df["provider_id"] == provider_id
         genuine_filter_est = (df["Y_est0"] == 1) & (df["Y_est1"] == 1) & has_same_query_id
 
-        impostor_filter_est_across = (df["Y_est0"] == 1) & (df["Y_est1"] == 1) & has_different_query_id
+        impostor_filter_est_across = (df["Y_est0"] == 1) & (df["Y_est1"] == 1) & has_different_query_id & has_same_demo
         impostor_filter_est_within = (df["Y_est0"] != df["Y_est1"]) & has_same_query_id
         if impostor_definition == "across_query":
             impostor_filter_est = impostor_filter_est_across
@@ -96,7 +99,7 @@ def fmr_fnmr(
 
         genuine_filter_anno = (df["Y0"] == 1) & (df["Y1"] == 1) & has_same_query_id
 
-        impostor_filter_anno_across = (df["Y0"] == 1) & (df["Y1"] == 1) & has_different_query_id
+        impostor_filter_anno_across = (df["Y0"] == 1) & (df["Y1"] == 1) & has_different_query_id & has_same_demo
         impostor_filter_anno_within = (df["Y0"] != df["Y1"]) & has_same_query_id
         if impostor_definition == "across_query":
             impostor_filter_anno = impostor_filter_anno_across
