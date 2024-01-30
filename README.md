@@ -4,7 +4,7 @@ Preprint available on [arXiv](TODO).
 
 This module benchmarks face recognition APIs (e.g., AWS Rekognition, Azure Face, or Face++) for overall performance and racial/gender bias. The benchmark scrapes a face dataset from internet sources and uses an unsupervised algorithm to score APIs on this dataset, so no manual labels are required.
 
-This package was developed by Ethan Mann (emann@alumni.caltech.edu), Ignacio Serna (ignacioserna.github.io), Manuel Knott (mknott@ethz.ch), and Professor Pietro Perona ([vision.caltech.edu](http://www.vision.caltech.edu/)).
+This package was developed by Ethan Mann (emann@alumni.caltech.edu), Ignacio Serna ([ignacioserna](https://ignacioserna.github.io/)), Manuel Knott (mknott@ethz.ch), and Professor Pietro Perona ([vision.caltech.edu](http://www.vision.caltech.edu/)).
 
 ---
 
