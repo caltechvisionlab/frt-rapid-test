@@ -114,6 +114,53 @@ class DetectedFace:
     def set_face_id(self, face_id):
         self.face_id = face_id
 
+
+    def uncropped(self,
+                  database,
+                  out_filename=None,
+                  return_stream=False,
+                  return_base64=False,
+                  return_image=False,
+                  ):
+        source_filename = database._get_image_path(photo_id=self.photo_id)
+
+        im = Image.open(source_filename)
+
+        if out_filename is not None:
+            im.save(out_filename)
+        else:
+            # Source: https://aws.amazon.com/blogs/machine-learning/build-your-own-face-recognition-service-using-amazon-rekognition/
+            stream = io.BytesIO()
+            # Note: I removed 'format=cropped_image.format'
+
+            # https://stackoverflow.com/questions/48248405/cannot-write-mode-rgba-as-jpeg/48248432
+            failed = False
+            for i in range(2):
+                if i == 1 and not failed:
+                    break
+                try:
+                    if "exif" in im.info:
+                        exif = im.info["exif"]
+                        # Does this reformat as JPEG if needed?
+                        im.save(stream, format="JPEG", exif=exif)
+                    else:
+                        im.save(stream, format="JPEG")
+                except Exception as e:
+                    if i == 1:
+                        raise e
+                    failed = True
+                    im = im.convert("RGB")
+
+            if return_stream:
+                return stream
+            elif return_image:
+                return im
+            image_binary = stream.getvalue()
+            if return_base64:
+                return base64.b64encode(image_binary).decode("ascii")
+            return image_binary
+
+
     def crop(
         self,
         database,

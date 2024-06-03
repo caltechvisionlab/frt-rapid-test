@@ -14,8 +14,20 @@ import traceback
 import requests
 import base64
 
+import hashlib
+import hmac
+import json
+import time
+import base64
+from datetime import datetime, timezone
+from http.client import HTTPSConnection
+
 from .face import BoundingBox, DetectedFace
 from .dataset import Photo
+
+
+def sign(key, msg):
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
 
 
 class ProviderType(Enum):
@@ -31,6 +43,9 @@ class ProviderType(Enum):
     FACEPLUSPLUS = 6
     MXFACE = 7  # not used
     CLEARVIEW = 8
+    ### new ones
+    LUXAND = 9
+    TENCENT = 10
     
 
 
@@ -42,6 +57,8 @@ PROVIDER_TO_LABEL = {
     ProviderType.MXFACE: "MXFace",
     ProviderType.CLEARVIEW: "Clearview",
     ProviderType.CLOUDMERSIVE: "Cloudmersive",
+    ProviderType.LUXAND: "Luxand",
+    ProviderType.TENCENT: "Tencent",
 }
 
 
@@ -68,6 +85,8 @@ def gen_provider_class(provider_enum):
         ProviderType.FACEPLUSPLUS: FacePlusPlus,
         ProviderType.CLEARVIEW: Clearview,
         ProviderType.CLOUDMERSIVE: Cloudmersive,
+        ProviderType.LUXAND: Luxand,
+        ProviderType.TENCENT: Tencent,
     }
     return enum_to_class_map[provider_enum]
 
@@ -693,3 +712,263 @@ class MXFace(Provider):
         )
         
         return response.json()["confidence"]
+
+
+class Luxand(Provider):
+    def __init__(self, database, credentials):
+        super().__init__(database, ProviderType.LUXAND, credentials)
+
+    def _detect_faces(self, benchmark_id, person_id, photo):
+        # Request files
+        files = {
+            "photo": photo.load_as_stream(self.database),
+        }
+        # Endpoint URL
+        url = "https://api.luxand.cloud/photo/crop"
+
+        # Request headers
+        headers = {
+            "token": self.credentials["key"],
+        }
+        # Making the POST request
+        response = requests.request("POST", url, headers=headers, files=files).json()
+        if response == {'status': 'failure', 'message': "Can't find face on that photo"}:
+            return []
+        if "status" in response:
+            print(response)
+        detected_faces = []
+        for face in response:
+            if not "rectangle" in face:
+                print(face)
+
+            box = face["rectangle"]
+
+            left = box["left"]
+            top = box["top"]
+            right = box["right"]
+            bottom = box["bottom"]
+
+            detected_faces.append(
+                DetectedFace(
+                    photo.get_photo_id(),
+                    person_id,
+                    BoundingBox(int(left), int(top), int(right), int(bottom)),
+                    self.provider_enum,
+                    benchmark_id,
+                    metadata=face["url"],
+                )
+            )
+
+        return detected_faces
+
+    def _compare_faces(self, detected_face1, detected_face2):
+
+        # Request data
+        data = {
+            "threshold": "0.8",
+        }
+        # Request files
+        files = {
+            "face1": Photo(detected_face1.photo_id, None).load_as_stream(self.database),
+            "face2": Photo(detected_face2.photo_id, None).load_as_stream(self.database),
+        }
+        # Endpoint URL
+        url = "https://api.luxand.cloud/photo/similarity"
+
+        # Request headers
+        headers = {
+            "token": self.credentials["key"],
+        }
+        # Making the POST request
+        response = requests.request("POST", url, headers=headers, data=data, files=files).json()
+
+        if not "score" in response:
+            print(response)
+            exit(1)
+
+        confidence = response["score"]
+        return confidence
+
+
+class Tencent(Provider):
+    def __init__(self, database, credentials):
+        super().__init__(database, ProviderType.TENCENT, credentials)
+        self.secret_id = credentials["endpoint"]
+        self.secret_key = credentials["key"]
+
+        self.service = "iai"
+        self.host = "iai.tencentcloudapi.com"
+        self.region = "ap-guangzhou"
+        self.version = "2020-03-03"
+        self.algorithm = "TC3-HMAC-SHA256"
+
+    def _detect_faces(self, benchmark_id, person_id, photo):
+        action = "DetectFace"
+
+        encoded_image = base64.b64encode(photo.load_as_bytes(self.database)).decode("ascii")
+        payload = {"MaxFaceNum": 2,
+                   "Image": 'data:image/jpeg;base64,' + encoded_image}  # We only need to know if there are more than 1 faces
+        params = json.dumps(payload)
+        timestamp = int(time.time())
+        date = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
+
+        # ************* Step 1: Concatenate the CanonicalRequest string *************
+        http_request_method = "POST"
+        canonical_uri = "/"
+        canonical_querystring = ""
+        ct = "application/json; charset=utf-8"
+        canonical_headers = "content-type:%s\nhost:%s\nx-tc-action:%s\n" % (ct, self.host, action.lower())
+        signed_headers = "content-type;host;x-tc-action"
+        hashed_request_payload = hashlib.sha256(params.encode("utf-8")).hexdigest()
+        canonical_request = (http_request_method + "\n" +
+                             canonical_uri + "\n" +
+                             canonical_querystring + "\n" +
+                             canonical_headers + "\n" +
+                             signed_headers + "\n" +
+                             hashed_request_payload)
+
+        # ************* Step 2: Concatenate the string to sign *************
+        credential_scope = date + "/" + self.service + "/" + "tc3_request"
+        hashed_canonical_request = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+        string_to_sign = (self.algorithm + "\n" +
+                          str(timestamp) + "\n" +
+                          credential_scope + "\n" +
+                          hashed_canonical_request)
+
+        # ************* Step 3: Calculate the Signature *************
+        secret_date = sign(("TC3" + self.secret_key).encode("utf-8"), date)
+        secret_service = sign(secret_date, self.service)
+        secret_signing = sign(secret_service, "tc3_request")
+        signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+        # ************* Step 4: Concatenate the Authorization *************
+        authorization = (self.algorithm + " " +
+                         "Credential=" + self.secret_id + "/" + credential_scope + ", " +
+                         "SignedHeaders=" + signed_headers + ", " +
+                         "Signature=" + signature)
+
+        # ************* Step 5: Build and Send a Request *************
+        headers = {
+            "Authorization": authorization,
+            "Content-Type": "application/json; charset=utf-8",
+            "Host": self.host,
+            "X-TC-Action": action,
+            "X-TC-Timestamp": timestamp,
+            "X-TC-Version": self.version
+        }
+
+        headers["X-TC-Region"] = self.region
+
+        try:
+            req = HTTPSConnection(self.host)
+            req.request("POST", "/", headers=headers, body=params.encode("utf-8"))
+            resp = req.getresponse()
+            response = json.loads(resp.read().decode("utf-8"))['Response']
+        except Exception as err:
+            print(err)
+
+        detected_faces = []
+        for face in response['FaceInfos']:
+            left = face["X"]
+            top = face["Y"]
+            right = face["X"] + face["Width"]
+            bottom = face["Y"] + face["Height"]
+
+            detected_faces.append(
+                DetectedFace(
+                    photo.get_photo_id(),
+                    person_id,
+                    BoundingBox(int(left), int(top), int(right), int(bottom)),
+                    self.provider_enum,
+                    benchmark_id,
+                    metadata=response["RequestId"],
+                )
+            )
+
+        return detected_faces
+
+    def _compare_faces(self, detected_face1, detected_face2):
+        action = "CompareFace"
+
+        encoded_imageA = detected_face1.crop(self.database, skip_padding=False, custom_padding=(25,25,True), return_base64=True) # add 25% padding on each side to avoid NoFaceInPhoto error
+        encoded_imageB = detected_face2.crop(self.database, skip_padding=False, custom_padding=(25,25,True), return_base64=True) # add 25% padding on each side to avoid NoFaceInPhoto error
+
+        # use uncropped images since tencent has many problems with cropped images (small resolution, can't detect face)
+        # right now, we anyway only use images wher 1 face was detected by tencents detection service
+        # encoded_imageA = detected_face1.uncropped(self.database, return_base64=True)
+        # encoded_imageB = detected_face2.uncropped(self.database, return_base64=True)
+
+        payload = {"ImageA": 'data:image/jpeg;base64,' + encoded_imageA,
+                   "ImageB": 'data:image/jpeg;base64,' + encoded_imageB}
+        params = json.dumps(payload)
+
+        timestamp = int(time.time())
+        date = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
+
+        # ************* Step 1: Concatenate the CanonicalRequest string *************
+        http_request_method = "POST"
+        canonical_uri = "/"
+        canonical_querystring = ""
+        ct = "application/json; charset=utf-8"
+        canonical_headers = "content-type:%s\nhost:%s\nx-tc-action:%s\n" % (ct, self.host, action.lower())
+        signed_headers = "content-type;host;x-tc-action"
+        hashed_request_payload = hashlib.sha256(params.encode("utf-8")).hexdigest()
+        canonical_request = (http_request_method + "\n" +
+                             canonical_uri + "\n" +
+                             canonical_querystring + "\n" +
+                             canonical_headers + "\n" +
+                             signed_headers + "\n" +
+                             hashed_request_payload)
+
+        # ************* Step 2: Concatenate the string to sign *************
+        credential_scope = date + "/" + self.service + "/" + "tc3_request"
+        hashed_canonical_request = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+        string_to_sign = (self.algorithm + "\n" +
+                          str(timestamp) + "\n" +
+                          credential_scope + "\n" +
+                          hashed_canonical_request)
+
+        # ************* Step 3: Calculate the Signature *************
+        secret_date = sign(("TC3" + self.secret_key).encode("utf-8"), date)
+        secret_service = sign(secret_date, self.service)
+        secret_signing = sign(secret_service, "tc3_request")
+        signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+        # ************* Step 4: Concatenate the Authorization *************
+        authorization = (self.algorithm + " " +
+                         "Credential=" + self.secret_id + "/" + credential_scope + ", " +
+                         "SignedHeaders=" + signed_headers + ", " +
+                         "Signature=" + signature)
+
+        # ************* Step 5: Build and Send a Request *************
+        headers = {
+            "Authorization": authorization,
+            "Content-Type": "application/json; charset=utf-8",
+            "Host": self.host,
+            "X-TC-Action": action,
+            "X-TC-Timestamp": timestamp,
+            "X-TC-Version": self.version
+        }
+        headers["X-TC-Region"] = self.region
+
+        try:
+            req = HTTPSConnection(self.host)
+            req.request("POST", "/", headers=headers, body=params.encode("utf-8"))
+            resp = req.getresponse()
+            response = json.loads(resp.read().decode("utf-8"))['Response']
+            if "Error" in response and response["Error"]["Code"] == "InvalidParameterValue.NoFaceInPhoto":
+                with open ("no_face_in_photo.txt", "a") as f:
+                    f.write(f"{detected_face1.photo_id} {detected_face1.bounding_box.bbox} {detected_face2.photo_id} {detected_face2.bounding_box.bbox}\n")
+                    print(detected_face1.photo_id, detected_face1.bounding_box.bbox, detected_face2.photo_id, detected_face2.bounding_box.bbox)
+        except Exception as err:
+            print(err)
+        if not "Score" in response and response["Error"]["Code"] == "InvalidParameterValue.NoFaceInPhoto":
+            print(" NO FACE IN PHOTO")
+            raise Exception("NoFaceInPhoto")
+        elif not "Score" in response and response["Error"]["Code"] == "FailedOperation.ImageResolutionTooSmall":
+            raise Exception("ImageResolutionTooSmall")
+        elif not "Score" in response:
+            print(response)
+            raise Exception("UnknownError")
+        confidence = response["Score"]
+        return confidence / 100.

@@ -338,6 +338,7 @@ class Database:
         # Read in from photo.csv to load each Version
         # in the next step.
         photo_csv = pd.read_csv(self._get_subpath(PHOTO_CSV))
+        photo_csv.set_index("photo_id", inplace=True, drop=False)
         self.num_photos = len(photo_csv)
 
         version_csv = pd.read_csv(self._get_subpath(VERSION_CSV))
@@ -356,7 +357,7 @@ class Database:
             except:
                 photo_ids = []
             for photo_id in photo_ids:
-                photo_row = photo_csv.iloc[photo_id]
+                photo_row = photo_csv.loc[photo_id]
                 assert photo_row["photo_id"] == photo_id
                 source_url = photo_row["source_url"]
                 curr_version.add_photo(Photo(photo_id, source_url))
