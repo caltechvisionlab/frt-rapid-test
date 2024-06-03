@@ -1,4 +1,6 @@
 **/.DS_Store
+**/._.DS_Store
+**/._photo
 __pycache__
 .pytest_cache
 docs/_build
@@ -16,3 +18,9 @@ experiments/**/*.zip
 experiments/**/*.html
 demo/demo_data
 .idea
+demo/**/*.csv
+demo/**/*.png
+demo/**/*.jpg
+demo/**/*.jpeg
+
+**/.ipynb_checkpoints/**
