@@ -141,7 +141,6 @@ class CFRO:
     :param names_path:                  path to txt file with input names to scrape (see ``names.txt`` above)
     :param providers_path:              path to csv file with provider credentials (see ``providers.csv`` above)
     :param database_path:               path to database directory for dataset/cached API output, created if it does not yet exist
-    :param constants_config_path:       path to .ini configuration file to override default constants (see ``config.ini`` above)
     :param label_faces:                 enables a labeler tool to annotate the dataset to verify unsupervised results
     :param restore:                     enables use of any existing database at ``database_path``
     :param add_timestamp:               appends a timestamp to ``database_path`` (be careful if ``restore == True``)
@@ -153,8 +152,8 @@ class CFRO:
     :param dataset_label:               optional label included in the output figures
     :param remove_duplicate_images:     enables a scan to remove duplicates from the scraped datasets
     :param scrape_from_past_n_days:     filters out articles older than n days to improve dataset recency
-    :param keep_duplicate_photo_dir:    if True, keeps the duplicate photo directory after removing duplicates
     :param apply_majority_vote:         if True, applies majority vote for for ID estimation, otherwise uses per-provider
+    :param use_ramdisk_for_photos:      if True, photos will be stored non-persistenly in memory
     """
 
     def __init__(
@@ -176,6 +175,7 @@ class CFRO:
             remove_duplicate_images=True,
             scrape_from_past_n_days=None,
             apply_majority_vote=True,
+            use_ramdisk_for_photos=False,
     ):
         self.names_path = names_path
         self.scraper_path = scraper_path
@@ -192,6 +192,7 @@ class CFRO:
         self.remove_duplicate_images = remove_duplicate_images
         self.scrape_articles_from_past_n_days = scrape_from_past_n_days
         self.apply_majority_vote = apply_majority_vote
+        self.use_ramdisk_for_photos = use_ramdisk_for_photos
 
         assert image_source in ["google_news", "google_images"], "Invalid image source. " \
                                                                  "Must be one of 'google_news' or 'google_images'"
@@ -203,7 +204,7 @@ class CFRO:
 
         if add_timestamp:
             self.database_path += " " + str(datetime.now())
-        self.database = Database(self.database_path)
+        self.database = Database(self.database_path, use_ramdisk_for_photos=use_ramdisk_for_photos)
 
         # Read in from names path to scrape for each name.
         (
@@ -260,6 +261,10 @@ class CFRO:
                     ids.add(self.database._get_person_id(person_name))
                 self.groups_with_id[category][group_type] = ids
                 self.union_of_groups_with_id[group_type] = ids
+
+    def release_ramdisks(self):
+        if self.use_ramdisk_for_photos:
+            self.database.release_ramdisks()
 
     def _prepare_constants_config(self):
         config = configparser.ConfigParser()
@@ -353,6 +358,7 @@ class CFRO:
         if self.label_faces:
             self.label_detected_faces()
         self.analyze()
+        self.release_ramdisks()
 
     @timer
     def load_photos(self):

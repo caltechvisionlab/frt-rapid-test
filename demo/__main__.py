@@ -28,14 +28,14 @@ benchmark = CFRO(
     image_source="google_images",  # Options: "google_images", "google_news"
     max_number_of_photos=100,  # maximum number of photos to download per person
     subsampling_seed=2022,  # seed for subsampling cross-query pairs
-    apply_majority_vote=True  # if True, majority vote will be applied to estimate labels
+    apply_majority_vote=True,  # if True, majority vote will be applied to estimate labels
+    use_ramdisk_for_photos=True,  # if True, photos will be stored non-persistenly in RAM disk
 )
 
 # # Run the entire benchmark.
 # benchmark.run()
 
 # Alternatively, run the benchmark step by step.
-
 benchmark.load_photos()
 
 benchmark.detect_faces()
@@ -49,5 +49,8 @@ benchmark.analyze(
     use_annotations=True,  # if True, uses annotations in results plots (if available), if False: ignores annotations
     fmr_fnmr_error_range=(0.0, 1.0)  # range of error rates to plot in FMR-FNMR plots
 )
-
 # All intermediate and final results are stored in the database_path folder.
+
+
+benchmark.release_ramdisks()  # this only has an effect if use_ramdisk_for_photos=True
+

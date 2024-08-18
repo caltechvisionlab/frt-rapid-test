@@ -1,7 +1,7 @@
+import subprocess
 from PIL import Image, ImageOps
 from datetime import datetime
 import pandas as pd
-import numpy as np
 import shutil
 import os
 
@@ -29,6 +29,9 @@ MATCHES_CSV = "matches"
 PHOTO_DIR = "photo"
 DUPLICATE_PHOTO_DIR = "duplicate_photo"
 VERIFY_DATABASE_FILE = "database.info"
+
+RAMDISK_SIZE_PHOTOS = 1024 * 4  # 4GB
+RAMDISK_SIZE_DUP_PHOTOS = 1024 * 4  # 4GB
 
 
 class Database:
@@ -95,7 +98,7 @@ class Database:
     detection_lock = Lock()
     comparison_lock = Lock()
 
-    def __init__(self, path):
+    def __init__(self, path, use_ramdisk_for_photos=False):
         """
         Loads an existing database from `path` if one exists.
         Otherwise, creates a new database at `path`.
@@ -152,7 +155,7 @@ class Database:
         # file exists at the specified path, then we can load
         # the existing database.
         if VERIFY_DATABASE_FILE not in os.listdir(path):
-            self._create_empty_database()
+            self._create_empty_database(use_ramdisk_for_photos=use_ramdisk_for_photos)
             self.is_fresh_database = True
         else:
             self._load_database()
@@ -190,7 +193,7 @@ class Database:
         subpath = self._get_subpath(csv_prefix)
         df.to_csv(subpath, header=True, index=False)
 
-    def _create_empty_database(self):
+    def _create_empty_database(self, use_ramdisk_for_photos=False):
         """
         Creates empty CSV files (with headers).
         Creates empty folder for photos/faces/results.
@@ -289,8 +292,37 @@ class Database:
         self._append_df_to_db(MATCHES_CSV, new_df, header=True)
 
         # Empty folder for photos (no longer for faces or benchmark output).
-        os.mkdir(self._get_subpath(PHOTO_DIR, csv=False))
-        os.mkdir(self._get_subpath(DUPLICATE_PHOTO_DIR, csv=False))
+        if use_ramdisk_for_photos:
+            self.init_ramdisk(self._get_subpath(PHOTO_DIR, csv=False), size=RAMDISK_SIZE_PHOTOS)
+            self.init_ramdisk(self._get_subpath(DUPLICATE_PHOTO_DIR, csv=False), size=RAMDISK_SIZE_DUP_PHOTOS)
+        else:
+            os.mkdir(self._get_subpath(PHOTO_DIR, csv=False))
+            os.mkdir(self._get_subpath(DUPLICATE_PHOTO_DIR, csv=False))
+
+
+    def init_ramdisk(self, mount_path: str, size: int = 1024):
+        """
+        Initializes the RAM disk for storing photos.
+        Exits script if creation fails.
+        """
+        try:
+            print("Ramdisk creation requires sudo. Please enter your password.")
+            os.makedirs(mount_path, exist_ok=True)
+            subprocess.run(['sudo', '-S', 'mount', '-t', 'tmpfs', '-o', f'size={size}M', 'tmpfs', mount_path], check=True)
+            print(f"RAM disk created at: {mount_path}")
+        except Exception as e:
+            print(f"Could not create non-persistent ramdisks for photos. This feature was only tested for Linux.")
+            exit(1)
+
+    def release_ramdisks(self):
+        for ramdisk_path in [
+            self._get_subpath(PHOTO_DIR, csv=False),
+            self._get_subpath(DUPLICATE_PHOTO_DIR, csv=False)
+        ]:
+
+            subprocess.run(['sudo', '-S', 'umount', ramdisk_path], check=True)
+            print(f"Removing RAM disk at: {ramdisk_path}")
+
 
     def _load_faces(self):
         """
