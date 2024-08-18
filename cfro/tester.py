@@ -320,7 +320,7 @@ class Benchmark:
                     detected_single_faces_flat[det_face.photo_id] = det_face
 
             for photo_id_1, photo_id_2 in subsampling_set:
-                if photo_id_1 in provider.detected_faces and photo_id_2 in provider.detected_faces:
+                if photo_id_1 in detected_single_faces_flat and photo_id_2 in detected_single_faces_flat:
                     face1 = detected_single_faces_flat[photo_id_1]
                     face2 = detected_single_faces_flat[photo_id_2]
                 else:
