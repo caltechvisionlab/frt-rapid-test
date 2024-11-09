@@ -1,6 +1,6 @@
-# A Rapid Test for Accuracy and Bias of Face Recognition Technology
+# A Rapid Test for Accuracy and Bias of Face Recognition Technology (WACV2025)
 
-Preprint available on [arXiv](TODO).
+[![Paper](https://img.shields.io/badge/arXiv-PDF-b31b1b)](https://arxiv.org/abs/xxxx.xxxxx)
 
 This module benchmarks face recognition APIs (e.g., AWS Rekognition, Azure Face, or Face++) for overall performance and racial/gender bias. The benchmark scrapes a face dataset from internet sources and uses an unsupervised algorithm to score APIs on this dataset, so no manual labels are required.
 
@@ -117,10 +117,10 @@ This project is licensed under the terms of the [MIT license](LICENSE).
 If you find this package useful, please consider citing our paper:
 
 ```
-@article{knott2024rapid,
-  title={A Rapid Test for Accuracy and Bias of Face Recognition Technology},
-  author={Knott, Manuel and Serna, Ignacio and Mann, Ethan and Perona, Pietro},
-  journal={arXiv preprint arXiv:2401.XXXXX},
-  year={2024}
+@inproceedings{knott2025rapid,
+	title = {A rapid test for accuracy and bias in face recognition technology},
+    booktitle = {Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)},
+	author = {Manuel Knott and Ignacio Serna and Ethan Mann and Pietro Perona},
+	year = {2025},
 }
 ```
