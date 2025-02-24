@@ -118,7 +118,7 @@ If you find this package useful, please consider citing our paper:
 
 ```
 @inproceedings{knott2025rapid,
-	title = {A rapid test for accuracy and bias in face recognition technology},
+	title = {A Rapid Test for Accuracy and Bias of Face Recognition Technology},
     booktitle = {Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)},
 	author = {Manuel Knott and Ignacio Serna and Ethan Mann and Pietro Perona},
 	year = {2025},
