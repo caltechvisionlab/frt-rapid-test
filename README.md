@@ -108,7 +108,7 @@ Contains supplementary files for the published paper.
 
 ## License
 
-This project is licensed under the terms of the [MIT license](LICENSE).
+This project is licensed under the terms of the [Apache-2.0 license](LICENSE).
 
 ---
 
