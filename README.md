@@ -2,7 +2,7 @@
 
 [![Paper](https://img.shields.io/badge/arXiv-PDF-b31b1b)](https://arxiv.org/abs/2502.14996)
 
-This module benchmarks face recognition APIs (e.g., AWS Rekognition, Azure Face, or Face++) for overall performance and racial/gender bias. The benchmark scrapes a face dataset from internet sources and uses an unsupervised algorithm to score APIs on this dataset, so no manual labels are required.
+This module benchmarks face recognition APIs (e.g., AWS Rekognition, Face++, Luxand, or Tencent) for overall performance and racial/gender bias. The benchmark queries images from internet sources and uses an unsupervised algorithm to estimate identities, so no manual labels are required. Images can be processed "on-the-fly" (in-memory) and there is no need to create or persistently store datasets.
 
 This package was developed by Ethan Mann (emann@alumni.caltech.edu), Ignacio Serna ([ignacioserna](https://ignacioserna.github.io/)), Manuel Knott (manuel.knott@alumni.ethz.ch), and Professor Pietro Perona ([vision.caltech.edu](http://www.vision.caltech.edu/)).
 
