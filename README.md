@@ -125,5 +125,4 @@ If you find this package useful, please consider citing our paper:
     year      = {2025},
     pages     = {7731-7740}
 }
-}
 ```
